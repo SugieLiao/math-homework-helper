@@ -495,6 +495,7 @@ async function wrongBook() {
           <span class="small muted">来源：${fmtDate(q.sub_created_at)} 的作业${q.lesson_name ? ` · ${esc(q.lesson_name)}` : q.unit_name ? ` · ${esc(q.unit_name)}` : ' · 未归类'}</span>
           <span class="spacer"></span>
           <a class="btn sm" href="#/q/${q.id}">举一反三</a>
+          <button class="btn sm danger" data-delq="${q.id}">删除</button>
         </div>
       </div>
     </div>`;
@@ -531,8 +532,9 @@ async function wrongBook() {
         <button class="btn sm" id="btn-w-all">全选</button>
         <button class="btn sm" id="btn-w-none">清空</button>
         <button class="btn primary" id="btn-make-paper">📝 错题组卷</button>
+        <button class="btn danger sm" id="btn-w-del">🗑 删除所选</button>
       </div>
-      <div class="hint">勾选题目（可以按课文或整个单元批量选），点「错题组卷」，老师会为每道错题出几道类似题，凑成一张可打印的练习卷。</div>
+      <div class="hint">勾选题目（可以按课文或整个单元批量选），点「错题组卷」凑成一张可打印的练习卷；点「删除所选」把不再需要的错题清掉。</div>
     </div>
     ${wrongs.length ? html : '<div class="empty">还没有错题记录</div>'}`;
 
@@ -569,6 +571,31 @@ async function wrongBook() {
     if (!ids.length) return toast('先勾选要做卷的错题');
     paperDialog(ids);
   };
+
+  const doDeleteWrong = async (ids) => {
+    if (!ids.length) return toast('先勾选要删除的错题');
+    if (
+      !confirm(
+        `删除这 ${ids.length} 道错题？\n\n它们下面已有的举一反三记录、掌握度进度会一起删掉；如果某份作业的题被删光，那份作业也会一并清掉。删了无法恢复。`,
+      )
+    )
+      return;
+    try {
+      busy('删除中…');
+      await api.post('/questions/batch-delete', { ids });
+      idle();
+      toast(`已删除 ${ids.length} 道错题`);
+      await wrongBook();
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
+  document.getElementById('btn-w-del').onclick = () =>
+    doDeleteWrong(boxes().filter((b) => b.checked).map((b) => b.dataset.id));
+  view.querySelectorAll('[data-delq]').forEach((b) => {
+    b.onclick = () => doDeleteWrong([b.dataset.delq]);
+  });
 }
 
 /* 组卷设置弹窗：每道错题出几道 + 顺序/乱序 + 标题 */

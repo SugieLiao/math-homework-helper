@@ -649,6 +649,29 @@ async function ensureCustomUnit(env: Env, textbookId?: string): Promise<string> 
   return id;
 }
 
+/** 删除单道错题（母题）：连带删它的举一反三记录和答案裁剪图，不留孤儿数据 */
+async function deleteQuestion(env: Env, id: string): Promise<void> {
+  const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(id).first<any>();
+  if (!q) return;
+  const keys: string[] = [q.answer_image_key].filter(Boolean);
+  const vs = await env.DB.prepare('SELECT attempt_image_key FROM variants WHERE parent_id = ?').bind(id).all<any>();
+  (vs.results || []).forEach((r: any) => {
+    if (r.attempt_image_key) keys.push(r.attempt_image_key);
+  });
+  await env.DB.prepare('DELETE FROM variants WHERE parent_id = ?').bind(id).run();
+  await env.DB.prepare('DELETE FROM questions WHERE id = ?').bind(id).run();
+  await Promise.all(keys.map((k) => env.IMAGES.delete(k).catch(() => {})));
+}
+
+/** 一份作业的题目被删光后，整份作业（含原图）也一起清掉，避免列表里出现「0 题」的空壳 */
+async function pruneEmptySubmission(env: Env, submissionId: string): Promise<void> {
+  if (!submissionId) return;
+  const left = await env.DB.prepare('SELECT COUNT(*) AS c FROM questions WHERE submission_id = ?')
+    .bind(submissionId)
+    .first<any>();
+  if (Number(left?.c || 0) === 0) await deleteSubmission(env, submissionId);
+}
+
 /** 删除一份作业：级联删变式题、题目，并清掉 R2 上的图片 */
 async function deleteSubmission(env: Env, id: string): Promise<void> {
   const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(id).first<any>();
@@ -1116,6 +1139,22 @@ async function handleApi(
     return json({ questions: filtered });
   }
 
+  // 批量删错题（错题本里勾选后一次删掉）。注意要排在 /questions/:id 之前，否则会被单题路由吃掉
+  if (p === '/questions/batch-delete' && method === 'POST') {
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) throw new HttpError(400, '先勾选要删除的错题');
+    const affected = new Set<string>();
+    for (const id of ids) {
+      const q = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ?').bind(id).first<any>();
+      if (q?.submission_id) affected.add(q.submission_id);
+      await deleteQuestion(env, id);
+    }
+    // 某份作业的题被删光了，整份作业也清掉
+    for (const sid of affected) await pruneEmptySubmission(env, sid);
+    return json({ ok: true, deleted: ids.length });
+  }
+
   /* ------------------------------------------------------------ 组卷 */
   // 列出历史卷子
   if (p === '/papers' && method === 'GET') {
@@ -1396,8 +1435,9 @@ async function handleApi(
   }
 
   if (qMatch && method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM variants WHERE parent_id = ?').bind(qMatch[1]).run();
-    await env.DB.prepare('DELETE FROM questions WHERE id = ?').bind(qMatch[1]).run();
+    const row = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ?').bind(qMatch[1]).first<any>();
+    await deleteQuestion(env, qMatch[1]);
+    if (row?.submission_id) await pruneEmptySubmission(env, row.submission_id);
     return json({ ok: true });
   }
 
