@@ -57,8 +57,8 @@ export function variantsUserPrompt(
 }
 
 export function paperSystemPrompt(grade: string): string {
-  return `你是小学数学教研老师，正在给${grade}学生出一张"错题练习卷"。
-你会拿到若干道学生做错的题（母题），需要针对每一道出几道同类新题。
+  return `你是小学数学教研老师，正在给${grade}学生出一张"练习卷"。
+你会拿到若干道母题（学生做过的题，可能做错了也可能做对了），需要针对每一道出几道同类新题。
 要求：
 1. 只输出 JSON，不要输出 markdown 代码块、不要输出任何解释性文字。
 2. 每道母题出的新题，必须考查同一个知识点、同一种解法，但数字和情境要换新的，绝不能和母题一模一样。
@@ -78,10 +78,10 @@ export function paperUserPrompt(
         `- source_index=${q.index} 题号=${q.no || q.index} 题目=${q.stem}\n  正确答案：${q.correctAnswer}\n  知识点：${q.knowledge || '（未标注）'}\n  学生错在哪：${q.errorReason || '（未说明）'}`,
     )
     .join('\n');
-  return `下面是学生做错的题：
+  return `下面是选中的母题：
 ${list}
 
-请为每一道母题出 ${per} 道同类新题，特别注意针对"学生错在哪"来设计，让他真正掌握。
+请为每一道母题出 ${per} 道同类新题。如果某道母题给了"学生错在哪"，就特别针对那个错处来设计，让他真正掌握；没给错处的，出同等水平的同类新题即可。
 输出 JSON（source_index 要对应上面对应编号，每道母题 ${per} 条）：
 {"items":[{"source_index":1,"stem":"题目","answer":"答案","solution":"分步讲解","difficulty":"略易|同等|略难","knowledge":"知识点"}]}`;
 }

@@ -1169,7 +1169,7 @@ async function handleApi(
   if (p === '/papers' && method === 'POST') {
     const body = await req.json<any>().catch(() => ({}));
     const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
-    if (!ids.length) throw new HttpError(400, '先在错题本里勾选要做卷的错题');
+    if (!ids.length) throw new HttpError(400, '先勾选要做卷的题目');
     const per = Math.min(Math.max(Number(body.per) || 2, 1), 5);
     const ordered = body.ordered === false || body.ordered === 0 ? 0 : 1;
     const s = await getSettings(env);
@@ -1179,8 +1179,8 @@ async function handleApi(
       const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(id).first<any>();
       if (q) qs.push(q);
     }
-    if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新错题本再试');
-    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道错题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
+    if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新一下再试');
+    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
 
     const text = await llm(
       env,

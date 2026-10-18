@@ -37,11 +37,12 @@ export function masteryLine(m) {
   return `<div class="small muted">举一反三：选了 ${m.variant_selected} 题 · 做了 ${m.variant_done} 题 · 做对 ${m.variant_correct} 题（需 ${m.need} 题）</div>`;
 }
 
-function qCard(q) {
+function qCard(q, withCheck = false) {
   const ok = Number(q.is_correct) === 1;
   return `
   <div class="card q-card ${ok ? 'correct' : 'wrong'}" data-q="${q.id}">
     <div class="row wrap">
+      ${withCheck ? `<input type="checkbox" class="pcheck" data-id="${q.id}" data-wrong="${ok ? 0 : 1}" title="勾上就放进卷子" style="width:20px;height:20px;flex:0 0 auto" />` : ''}
       <span class="q-no">${esc(q.no)}.</span>
       <span class="badge ${ok ? 'pass' : 'wrong'}">${ok ? '做对了' : '做错了'}</span>
       ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
@@ -366,6 +367,21 @@ async function submission(id) {
         <button class="btn danger sm" id="btn-del-sub">删除这份作业</button>
       </div>
     </div>
+    ${
+      qs.length
+        ? `<div class="card noprint" id="sp-bar">
+      <div class="row wrap">
+        <b>组卷：已选 <span id="sp-sel">0</span> 题</b>
+        <span class="spacer"></span>
+        <button class="btn sm" id="btn-sp-wrong">只选错题</button>
+        <button class="btn sm" id="btn-sp-all">全选</button>
+        <button class="btn sm" id="btn-sp-none">清空</button>
+        <button class="btn primary" id="btn-sp-paper">📝 组卷</button>
+      </div>
+      <div class="hint">勾选要练的题目（进来时已经帮你把做错的都选上了），点「组卷」按每道题出几道类似题，凑成一张可打印的练习卷。</div>
+    </div>`
+        : ''
+    }
     <div class="section-title">逐题批改</div>
     ${
       qs.length
@@ -381,7 +397,7 @@ async function submission(id) {
             }
           </div>`
     }
-    <div id="qlist">${qs.map(qCard).join('')}</div>`;
+    <div id="qlist">${qs.map((q) => qCard(q, true)).join('')}</div>`;
   const lessonBtn = document.getElementById('btn-save-lesson');
   if (lessonBtn) {
     lessonBtn.onclick = async () => {
@@ -432,6 +448,39 @@ async function submission(id) {
       }
     };
   }
+
+  /* 组卷：勾选题目 → 出卷（和错题本走的同一套流程） */
+  if (qs.length) {
+    const pboxes = () => Array.from(view.querySelectorAll('.pcheck'));
+    const refreshSel = () => {
+      const el = document.getElementById('sp-sel');
+      if (el) el.textContent = String(pboxes().filter((b) => b.checked).length);
+    };
+    const setSel = (on, onlyWrong) => {
+      pboxes().forEach((b) => {
+        b.checked = on && (!onlyWrong || b.dataset.wrong === '1');
+      });
+      refreshSel();
+    };
+    pboxes().forEach((b) => {
+      b.onchange = refreshSel;
+      b.checked = b.dataset.wrong === '1'; // 默认选上做错的
+    });
+    refreshSel();
+    document.getElementById('btn-sp-wrong').onclick = () => setSel(true, true);
+    document.getElementById('btn-sp-all').onclick = () => setSel(true, false);
+    document.getElementById('btn-sp-none').onclick = () => setSel(false, false);
+    document.getElementById('btn-sp-paper').onclick = () => {
+      const ids = pboxes()
+        .filter((b) => b.checked)
+        .map((b) => b.dataset.id);
+      if (!ids.length) return toast('先勾选要做卷的题目');
+      const d = new Date();
+      const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      paperDialog(ids, { title: '作业组卷', defTitle: `作业练习卷 ${md}` });
+    };
+  }
+
   bindCards();
 }
 
@@ -605,17 +654,18 @@ async function wrongBook() {
 }
 
 /* 组卷设置弹窗：每道错题出几道 + 顺序/乱序 + 标题 */
-function paperDialog(questionIds) {
+function paperDialog(questionIds, opts = {}) {
   const wrap = document.createElement('div');
   wrap.className = 'modal';
   const d = new Date();
-  const defTitle = `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const defTitle =
+    opts.defTitle || `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   wrap.innerHTML = `
     <div class="modal-card">
-      <h3>错题组卷</h3>
-      <p class="small muted" style="margin-top:-6px">已选 ${questionIds.length} 道错题</p>
+      <h3>${esc(opts.title || '错题组卷')}</h3>
+      <p class="small muted" style="margin-top:-6px">已选 ${questionIds.length} 道题</p>
       <div class="field">
-        <label>每道错题出几道类似题</label>
+        <label>每道题出几道类似题</label>
         <select id="pp-per">
           <option value="1">1 道</option>
           <option value="2" selected>2 道</option>
@@ -659,7 +709,7 @@ function paperDialog(questionIds) {
     };
     close();
     try {
-      busy(`老师在出卷…（${questionIds.length} 道错题，大约 30 秒）`);
+      busy(`老师在出卷…（${questionIds.length} 道题，大约 30 秒）`);
       const r = await withTimeout(api.post('/papers', body), 150000);
       idle();
       toast(`出了 ${r.count} 道题`);
@@ -763,7 +813,7 @@ async function renderPaper(id) {
         <span class="badge gray">${esc(it.difficulty || '同等')}</span>
         ${it.knowledge ? `<span class="badge gray">${esc(it.knowledge)}</span>` : ''}
         <span class="spacer"></span>
-        <span class="small muted">来自错题 ${esc(it.source_no || '')}</span>
+        <span class="small muted">来自第 ${esc(it.source_no || '')} 题</span>
       </div>
       <div class="stem" style="margin:4px 0">${nl2br(it.stem)}</div>
       <div class="small muted">答案：${esc(it.answer)}</div>
