@@ -25,6 +25,78 @@ export function idle() {
   document.getElementById('mask').classList.add('hidden');
 }
 
+/* ------------------------------------------------ 图片放大查看 */
+let lightboxEl = null;
+
+/** 关闭大图 */
+export function closeImage() {
+  if (lightboxEl) {
+    lightboxEl.remove();
+    lightboxEl = null;
+    document.removeEventListener('keydown', onImageKey);
+  }
+}
+
+function onImageKey(e) {
+  if (e.key === 'Escape') closeImage();
+}
+
+/** 点作业照片看原图：默认适应屏幕，可切到 1:1 原图并拖动查看 */
+export function openImage(src, alt) {
+  closeImage();
+  const wrap = document.createElement('div');
+  wrap.className = 'lightbox';
+  wrap.innerHTML = `
+    <div class="lb-bar">
+      <button class="lb-btn" data-act="zoom">原图 1:1</button>
+      <button class="lb-btn" data-act="close">关闭 ✕</button>
+    </div>
+    <div class="lb-wrap">
+      <div class="lb-loading">加载中…</div>
+      <img class="lb-img" src="${esc(src)}" alt="${esc(alt || '')}" />
+    </div>`;
+  document.body.appendChild(wrap);
+  lightboxEl = wrap;
+
+  const img = wrap.querySelector('.lb-img');
+  const loading = wrap.querySelector('.lb-loading');
+  const zoomBtn = wrap.querySelector('[data-act=zoom]');
+  let actual = false;
+
+  const finish = () => loading.remove();
+  if (img.complete && img.naturalWidth) finish();
+  else {
+    img.onload = finish;
+    img.onerror = () => {
+      loading.textContent = '图片加载失败';
+    };
+  }
+
+  const toggle = () => {
+    actual = !actual;
+    wrap.classList.toggle('actual', actual);
+    zoomBtn.textContent = actual ? '适应屏幕' : '原图 1:1';
+    wrap.querySelector('.lb-wrap').scrollTo(0, 0);
+  };
+  zoomBtn.onclick = (e) => {
+    e.stopPropagation();
+    toggle();
+  };
+  wrap.querySelector('[data-act=close]').onclick = (e) => {
+    e.stopPropagation();
+    closeImage();
+  };
+  // 点图片切换缩放；点图片以外的空白区关闭
+  img.onclick = (e) => {
+    e.stopPropagation();
+    toggle();
+  };
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap || e.target.classList.contains('lb-wrap')) closeImage();
+  });
+  document.addEventListener('keydown', onImageKey);
+}
+
 /**
  * 居中的确认弹窗，替代浏览器的原生 confirm()。
  * 原生 confirm 的位置由浏览器决定（Edge/Chrome 会贴在地址栏下方），CSS 管不了，

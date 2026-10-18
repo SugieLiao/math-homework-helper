@@ -147,6 +147,18 @@ pre.sol { white-space: pre-wrap; font: inherit; margin: 0; }
 .spinner { width: 34px; height: 34px; margin: 0 auto 10px; border: 3px solid #dfe4f2; border-top-color: var(--primary); border-radius: 50%; animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+/* ---------------- 图片放大查看 ---------------- */
+img.zoomable { cursor: zoom-in; }
+.lightbox { position: fixed; inset: 0; background: rgba(0,0,0,.92); z-index: 200; display: flex; flex-direction: column; }
+.lb-bar { display: flex; gap: 8px; justify-content: flex-end; padding: 10px 12px; flex: none; }
+.lb-btn { background: rgba(255,255,255,.14); color: #fff; border: none; border-radius: 8px; padding: 7px 14px; font-size: 14px; cursor: pointer; }
+.lb-wrap { position: relative; flex: 1; min-height: 0; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 0 8px 12px; -webkit-overflow-scrolling: touch; }
+.lightbox .lb-img { max-width: 100%; max-height: 100%; object-fit: contain; cursor: zoom-out; }
+/* 1:1 原图：不缩放，容器可拖动/双指缩放查看细节 */
+.lightbox.actual .lb-wrap { align-items: flex-start; justify-content: flex-start; }
+.lightbox.actual .lb-img { max-width: none; max-height: none; cursor: zoom-in; }
+.lb-loading { color: #bbb; font-size: 13px; position: absolute; }
+
 .modal { position: fixed; inset: 0; background: rgba(20,24,35,.45); display: flex; align-items: center; justify-content: center; z-index: 120; padding: 16px; }
 .modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 380px; max-height: calc(100vh - 32px); overflow-y: auto; }
 .modal-card h3 { margin-top: 0; }
@@ -157,7 +169,7 @@ pre.sol { white-space: pre-wrap; font: inherit; margin: 0; }
 /* ---------------- print ---------------- */
 @media print {
   body { background: #fff; }
-  .topbar, .noprint, .toast, .mask, .modal { display: none !important; }
+  .topbar, .noprint, .toast, .mask, .modal, .lightbox { display: none !important; }
   main { max-width: none; padding: 0; }
   .print-head { display: block !important; }
   .p-item { page-break-inside: avoid; }

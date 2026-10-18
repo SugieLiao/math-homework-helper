@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog, openImage } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -50,7 +50,7 @@ function qCard(q) {
     </div>
     <div class="stem">${nl2br(q.stem)}</div>
     <div class="answer-line">作答：<b>${esc(q.student_answer || '（空白）')}</b>${ok ? '' : ` &nbsp;·&nbsp; 正确答案：<b>${esc(q.correct_answer)}</b>`}</div>
-    ${q.answer_image_key ? `<img class="ans-img" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
+    ${q.answer_image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
     ${!ok && q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
     ${!ok && q.solution ? `<div class="solbox"><div class="t">正确做法</div><pre class="sol">${esc(q.solution)}</pre></div>` : ''}
     ${masteryLine(q.mastery)}
@@ -259,7 +259,7 @@ async function home(opts = {}) {
     <div class="sub-item" style="border-bottom:1px solid var(--line)">
       <input type="checkbox" class="sub-check" data-id="${s.id}" style="width:20px;height:20px;flex:0 0 auto" />
       <a href="#/s/${s.id}" style="display:flex;flex:1;min-width:0;text-decoration:none;color:inherit">
-        <img class="sub-thumb" src="${api.imgUrl(s.image_key)}" alt="" />
+        <img class="sub-thumb zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" />
         <div style="flex:1;min-width:0">
           <div style="font-weight:600">${fmtDate(s.created_at)}</div>
           <div class="small muted">${s.total} 题 · 错 ${s.wrong} 题 · 过关 ${s.passed} 题</div>
@@ -345,7 +345,7 @@ async function submission(id) {
         <span class="badge ${qs.filter((q) => !Number(q.is_correct)).length ? 'wrong' : 'pass'}">
           错 ${qs.filter((q) => !Number(q.is_correct)).length} 题</span>
       </div>
-      ${s.image_key ? `<img class="ans-img" src="${api.imgUrl(s.image_key)}" alt="作业原图" style="max-height:420px" />` : ''}
+      ${s.image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" style="max-height:420px" />` : ''}
       <div class="row wrap" style="margin-top:12px">
         <label style="min-width:92px">属于</label>
         <select id="s-lesson" style="flex:1;min-width:160px">
@@ -1024,4 +1024,18 @@ async function route() {
 }
 
 window.addEventListener('hashchange', route);
+
+/* 图片点击放大：统一事件委托，动态渲染的内容无需逐个绑定 */
+document.addEventListener(
+  'click',
+  (e) => {
+    const img = e.target instanceof Element ? e.target.closest('img.zoomable') : null;
+    if (!img) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openImage(img.getAttribute('src') || '', img.getAttribute('alt') || '');
+  },
+  false,
+);
+
 route();
