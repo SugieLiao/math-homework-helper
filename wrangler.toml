@@ -1,0 +1,36 @@
+# 数学家 · Cloudflare Worker 配置（Worker / D1 / R2 的资源名仍是 math-helper-*，改名会断路由，保持不变）
+# 部署：npm run deploy（wrangler deploy）
+# 数据库初始化：npm run db:init
+
+name = "math-helper"
+main = "src/worker.ts"
+compatibility_date = "2025-09-25"
+
+# 只接管 kids.liaohao.cc（该主机名已有一条 AAAA 100:: 代理记录，供 Worker 路由使用）
+# 首次绑定见 README「路由绑定」一节（需要带 Zone Workers Routes 权限的 Token）
+routes = [
+  { pattern = "kids.liaohao.cc/math", custom_domain = false },
+  { pattern = "kids.liaohao.cc/math/*", custom_domain = false },
+  { pattern = "kids.liaohao.cc/app/*", custom_domain = false },
+  { pattern = "kids.liaohao.cc/api/*", custom_domain = false },
+  { pattern = "kids.liaohao.cc/*", custom_domain = false },
+]
+workers_dev = true
+
+# 静态前端：public/math/*  ->  https://kids.liaohao.cc/math/*
+[assets]
+directory = "public"
+
+# D1 数据库（database_id 在首次创建后回填，见 README）
+[[d1_databases]]
+binding = "DB"
+database_name = "math-helper-db"
+database_id = "b9aa60f6-04e0-4c58-a357-5db289214ed7"
+
+# R2 图床
+[[r2_buckets]]
+binding = "IMAGES"
+bucket_name = "math-helper-images"
+
+[observability]
+enabled = false

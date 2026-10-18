@@ -1,0 +1,16 @@
+{
+  "name": "math-helper",
+  "version": "1.0.0",
+  "private": true,
+  "description": "数学家 - 拍照批改作业 + 举一反三练习系统（Cloudflare Worker + D1 + R2）",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute math-helper-db --remote --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute math-helper-db --local --file=./schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "wrangler": "^4.151.1"
+  }
+}
