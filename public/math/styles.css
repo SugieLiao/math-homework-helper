@@ -98,6 +98,11 @@ textarea { resize: vertical; min-height: 70px; }
 
 /* ---------------- home ---------------- */
 .hero { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+
+/* 首页只看列表用的筛选条：一行放下教材 + 课文，尽量不占屏 */
+.filter-bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 0; }
+.filter-bar select { flex: 1 1 0; min-width: 0; font-size: 14px; padding: 9px 10px; }
+.filter-bar select:last-child { flex: 1.15 1 0; }
 .stat-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
 .stat { background: #fff; border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; text-align: center; }
 .stat b { display: block; font-size: 22px; }
@@ -143,7 +148,7 @@ pre.sol { white-space: pre-wrap; font: inherit; margin: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
 .modal { position: fixed; inset: 0; background: rgba(20,24,35,.45); display: flex; align-items: center; justify-content: center; z-index: 120; padding: 16px; }
-.modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 380px; }
+.modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 380px; max-height: calc(100vh - 32px); overflow-y: auto; }
 .modal-card h3 { margin-top: 0; }
 
 /* ---------------- print ---------------- */

@@ -64,6 +64,70 @@ function qCard(q) {
 /* ------------------------------------------------ 首页 */
 const TB_KEY = 'mh_textbook';
 
+/* 交作业弹窗：点「拍照 / 相册」时先弹出来，让用户选这次作业归到哪一课，再调起相机 */
+let pendingKind = null; // 'shoot' | 'album'
+let pendingLessonId = ''; // 弹窗里选定的课文，上传时带给后端
+
+const lessonGroupsHtml = (units) =>
+  units
+    .map(
+      (u) =>
+        `<optgroup label="${esc(u.name)}">${u.lessons
+          .map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`)
+          .join('')}</optgroup>`,
+    )
+    .join('');
+
+async function fillUploadLessons(tbId, prefer) {
+  const sel = document.getElementById('up-lesson');
+  const keep = prefer !== undefined ? prefer : sel.value;
+  sel.innerHTML = `<option value="">— 先不选，批改后再归类 —</option>`;
+  if (!tbId) return;
+  try {
+    const t = await api.get(`/textbook?textbook=${encodeURIComponent(tbId)}`);
+    sel.innerHTML =
+      `<option value="">— 先不选，批改后再归类 —</option>` + lessonGroupsHtml(t.units || []);
+    if (keep) sel.value = keep;
+  } catch (e) {
+    /* 大纲拉不到也不影响交作业 */
+  }
+}
+
+async function openUploadModal(kind, textbooks, tbId, preferLesson) {
+  pendingKind = kind;
+  const tbSel = document.getElementById('up-tb');
+  tbSel.innerHTML = (textbooks || [])
+    .map((t) => `<option value="${esc(t.id)}">${esc(t.name)}</option>`)
+    .join('');
+  if (tbId) tbSel.value = tbId;
+  document.getElementById('up-title').textContent = kind === 'shoot' ? '拍照交作业' : '从相册选照片';
+  document.getElementById('up-go').textContent = kind === 'shoot' ? '开始拍照' : '去相册选';
+  document.getElementById('up-lesson').innerHTML = `<option value="">加载中…</option>`;
+  document.getElementById('up-modal').classList.remove('hidden');
+  await fillUploadLessons(tbSel.value, preferLesson || '');
+}
+
+function closeUploadModal() {
+  document.getElementById('up-modal').classList.add('hidden');
+}
+
+document.getElementById('up-cancel').onclick = closeUploadModal;
+document.getElementById('up-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'up-modal') closeUploadModal();
+});
+document.getElementById('up-tb').onchange = async (e) => {
+  localStorage.setItem(TB_KEY, e.target.value);
+  await fillUploadLessons(e.target.value, '');
+};
+document.getElementById('up-go').onclick = () => {
+  pendingLessonId = document.getElementById('up-lesson').value || '';
+  const kind = pendingKind;
+  closeUploadModal();
+  // 必须在用户手势里同步触发，否则 iOS 会拦住 file input
+  const inputId = kind === 'album' ? 'file-homework-album' : 'file-homework';
+  document.getElementById(inputId).click();
+};
+
 async function home(opts = {}) {
   let textbooks = [];
   let units = [];
@@ -98,31 +162,14 @@ async function home(opts = {}) {
       <button class="btn big" id="btn-set">⚙️ 设置</button>
     </div>
 
-    <div class="card">
-      <div class="row wrap">
-        <label style="min-width:72px">教材</label>
-        <select id="tb-pick" style="flex:1;min-width:150px">
-          ${textbooks.map((t) => `<option value="${esc(t.id)}" ${t.id === tbId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-        </select>
-        <label style="min-width:52px">课文</label>
-        <select id="filter-lesson" style="flex:1;min-width:150px">
-          <option value="">全部（这本教材的所有课文）</option>
-          ${lessonOptionsFor(units)}
-        </select>
-        <a class="btn sm" href="#/textbook">管理大纲</a>
-      </div>
-      <div class="hint">选教材和课文，可以只看某一课的作业；默认「全部」= 这本教材的所有课文。</div>
-    </div>
-
-    <div class="card">
-      <div class="row wrap">
-        <label style="min-width:92px">这次作业属于</label>
-        <select id="lesson-pick" style="flex:1;min-width:180px">
-          <option value="">— 先不选，批改后再归类 —</option>
-          ${lessonOptionsFor(units)}
-        </select>
-      </div>
-      <div class="hint">选了以后，这份作业会挂在对应单元/课文下，以后按单元复习时一筛就出来。</div>
+    <div class="filter-bar">
+      <select id="tb-pick" title="教材">
+        ${textbooks.map((t) => `<option value="${esc(t.id)}" ${t.id === tbId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
+      </select>
+      <select id="filter-lesson" title="课文">
+        <option value="">全部课文</option>
+        ${lessonOptionsFor(units)}
+      </select>
     </div>
 
     <div id="stats" class="stat-grid" style="margin:12px 0"></div>
@@ -134,8 +181,8 @@ async function home(opts = {}) {
     </div>
     <div id="list"></div>`;
 
-  document.getElementById('btn-shoot').onclick = () => document.getElementById('file-homework').click();
-  document.getElementById('btn-album').onclick = () => document.getElementById('file-homework-album').click();
+  document.getElementById('btn-shoot').onclick = () => openUploadModal('shoot', textbooks, tbId, lessonFilter);
+  document.getElementById('btn-album').onclick = () => openUploadModal('album', textbooks, tbId, lessonFilter);
   document.getElementById('btn-wrong').onclick = () => (location.hash = '#/wrong');
   document.getElementById('btn-set').onclick = () => (location.hash = '#/settings');
 
@@ -470,8 +517,8 @@ async function handleHomeworkFile(input) {
   try {
     busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
     const small = await compressImage(file);
-    const pickEl = document.getElementById('lesson-pick');
-    const lessonId = pickEl ? pickEl.value : '';
+    // 归类选的是弹窗里那一课，不是首页筛选
+    const lessonId = pendingLessonId || '';
     const up = await api.upload('/homework/upload', small, lessonId ? { lesson_id: lessonId } : {});
     subId = up.id;
     busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');

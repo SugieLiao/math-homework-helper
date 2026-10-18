@@ -32,6 +32,26 @@
   </div>
 </div>
 
+<!-- 交作业弹窗：先问「这份作业属于哪一课」，再调起拍照 / 相册 -->
+<div id="up-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3 id="up-title">交作业</h3>
+    <div class="field">
+      <label>教材</label>
+      <select id="up-tb"></select>
+    </div>
+    <div class="field">
+      <label>这次作业属于</label>
+      <select id="up-lesson"></select>
+      <div class="hint">选了以后这份作业就挂在对应单元/课文下，以后按单元复习一筛就出来。不选也行，批改完再归类。</div>
+    </div>
+    <div class="row-end">
+      <button class="btn" id="up-cancel">取消</button>
+      <button class="btn primary" id="up-go">开始</button>
+    </div>
+  </div>
+</div>
+
 <!-- 拍照（直接调起摄像头） -->
 <input type="file" id="file-homework" accept="image/*" capture="environment" class="hidden" />
 <input type="file" id="file-variant" accept="image/*" capture="environment" class="hidden" />
