@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -290,7 +290,11 @@ async function home(opts = {}) {
 
   const doDelete = async (ids) => {
     if (!ids.length) return toast('先勾选要删除的作业');
-    if (!confirm(`确定删除这 ${ids.length} 份作业？里面的题目、举一反三记录和图片会一起删掉，无法恢复。`)) return;
+    const okDel = await confirmDialog(
+      `里面的题目、举一反三记录和图片会一起删掉，无法恢复。`,
+      { title: `删除这 ${ids.length} 份作业？` },
+    );
+    if (!okDel) return;
     busy('删除中…');
     try {
       await api.post('/submissions/batch-delete', { ids });
@@ -395,7 +399,10 @@ async function submission(id) {
   const delBtn = document.getElementById('btn-del-sub');
   if (delBtn) {
     delBtn.onclick = async () => {
-      if (!confirm('删除这份作业？题目、举一反三记录和图片都会一起删掉，无法恢复。')) return;
+      const ok = await confirmDialog('题目、举一反三记录和图片都会一起删掉，无法恢复。', {
+        title: '删除这份作业？',
+      });
+      if (!ok) return;
       busy('删除中…');
       try {
         await api.del(`/submissions/${id}`);
@@ -574,12 +581,11 @@ async function wrongBook() {
 
   const doDeleteWrong = async (ids) => {
     if (!ids.length) return toast('先勾选要删除的错题');
-    if (
-      !confirm(
-        `删除这 ${ids.length} 道错题？\n\n它们下面已有的举一反三记录、掌握度进度会一起删掉；如果某份作业的题被删光，那份作业也会一并清掉。删了无法恢复。`,
-      )
-    )
-      return;
+    const okDel = await confirmDialog(
+      '它们下面已有的举一反三记录、掌握度进度会一起删掉；如果某份作业的题被删光，那份作业也会一并清掉。删了无法恢复。',
+      { title: `删除这 ${ids.length} 道错题？` },
+    );
+    if (!okDel) return;
     try {
       busy('删除中…');
       await api.post('/questions/batch-delete', { ids });
@@ -817,7 +823,10 @@ async function renderPaper(id) {
   document.getElementById('pi-del').onclick = async () => {
     const ids = boxes().filter((b) => b.checked).map((b) => b.dataset.id);
     if (!ids.length) return toast('先勾选要删掉的题');
-    if (!confirm(`删掉这 ${ids.length} 道题？`)) return;
+    const okDel = await confirmDialog('删掉后这张卷子就没有这些题了，可以再重新组卷。', {
+      title: `删掉这 ${ids.length} 道题？`,
+    });
+    if (!okDel) return;
     try {
       busy('删除中…');
       await api.del(`/papers/${id}/items`, { ids });

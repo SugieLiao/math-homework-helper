@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { esc, toast, busy, idle } from './util.js';
+import { esc, toast, busy, idle, confirmDialog } from './util.js';
 
 const PRESETS = [
   {
@@ -297,7 +297,10 @@ export async function renderSettings() {
       return;
     }
     if (act === 'del') {
-      if (!confirm(`确定删除「${p ? p.name : id}」这条模型源？`)) return;
+      const okDel = await confirmDialog('删掉后要重新填接口和 Key 才能再用。', {
+        title: `删除「${p ? p.name : id}」这条模型源？`,
+      });
+      if (!okDel) return;
       busy('删除中…');
       try {
         await api.del(`/profiles/${id}`);

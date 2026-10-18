@@ -150,11 +150,14 @@ pre.sol { white-space: pre-wrap; font: inherit; margin: 0; }
 .modal { position: fixed; inset: 0; background: rgba(20,24,35,.45); display: flex; align-items: center; justify-content: center; z-index: 120; padding: 16px; }
 .modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 380px; max-height: calc(100vh - 32px); overflow-y: auto; }
 .modal-card h3 { margin-top: 0; }
+.confirm-card .confirm-msg { font-size: 14px; line-height: 1.7; color: var(--ink-2); margin: 8px 0 18px; white-space: pre-wrap; }
+.confirm-card .row-end { gap: 10px; }
+.confirm-card .row-end .btn { min-width: 84px; }
 
 /* ---------------- print ---------------- */
 @media print {
   body { background: #fff; }
-  .topbar, .noprint, .toast, .mask { display: none !important; }
+  .topbar, .noprint, .toast, .mask, .modal { display: none !important; }
   main { max-width: none; padding: 0; }
   .print-head { display: block !important; }
   .p-item { page-break-inside: avoid; }

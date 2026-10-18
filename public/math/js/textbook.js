@@ -1,5 +1,5 @@
 import { api } from './api.js';
-import { esc, toast, busy, idle } from './util.js';
+import { esc, toast, busy, idle, confirmDialog } from './util.js';
 
 const TB_KEY = 'mh_textbook';
 
@@ -187,7 +187,10 @@ function drawTree() {
 
   box.querySelectorAll('[data-del-lesson]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除这条自建课文？（关联的作业会变成「未归类」，作业本身不会被删）')) return;
+      const ok = await confirmDialog('关联的作业会变成「未归类」，作业本身不会被删。', {
+        title: '删除这条自建课文？',
+      });
+      if (!ok) return;
       busy('删除中…');
       try {
         await api.del(`/lessons/${b.dataset.delLesson}`);
@@ -202,7 +205,10 @@ function drawTree() {
   });
   box.querySelectorAll('[data-del-unit]').forEach((b) => {
     b.onclick = async () => {
-      if (!confirm('删除这个自建单元和它的全部课文？（作业不会被删，只会变成未归类）')) return;
+      const ok = await confirmDialog('这个单元和它下面的全部课文都会删掉；作业不会被删，只会变成未归类。', {
+        title: '删除这个自建单元？',
+      });
+      if (!ok) return;
       busy('删除中…');
       try {
         await api.del(`/units/${b.dataset.delUnit}`);

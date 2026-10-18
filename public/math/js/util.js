@@ -25,6 +25,52 @@ export function idle() {
   document.getElementById('mask').classList.add('hidden');
 }
 
+/**
+ * 居中的确认弹窗，替代浏览器的原生 confirm()。
+ * 原生 confirm 的位置由浏览器决定（Edge/Chrome 会贴在地址栏下方），CSS 管不了，
+ * 所以全部换成自己的弹窗，保证在屏幕正中间。返回 Promise<boolean>。
+ */
+export function confirmDialog(message, opts = {}) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    const danger = opts.danger !== false;
+    wrap.innerHTML = `
+      <div class="modal-card confirm-card" role="dialog" aria-modal="true">
+        <h3>${esc(opts.title || '请确认')}</h3>
+        <div class="confirm-msg">${esc(message).replace(/\n/g, '<br/>')}</div>
+        <div class="row-end">
+          <button class="btn" data-act="no">${esc(opts.cancelText || '取消')}</button>
+          <button class="btn ${danger ? 'danger' : 'primary'}" data-act="yes">${esc(opts.okText || '确定')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    let closed = false;
+    const done = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') done(false);
+      else if (e.key === 'Enter') done(true);
+    };
+    wrap.querySelector('[data-act=no]').onclick = () => done(false);
+    wrap.querySelector('[data-act=yes]').onclick = () => done(true);
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(false);
+    });
+    document.addEventListener('keydown', onKey);
+    // 焦点放到主按钮上，回车就能确认
+    setTimeout(() => {
+      const y = wrap.querySelector('[data-act=yes]');
+      if (y) y.focus();
+    }, 0);
+  });
+}
+
 export function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso.replace(' ', 'T') + (iso.includes('Z') ? '' : 'Z'));
