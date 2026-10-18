@@ -11,7 +11,9 @@ export function gradeSystemPrompt(grade: string): string {
 5. error_reason 用一句话、对小学生说话的口吻，指出"错在哪里"（例如把进位忘了、把减号看成加号、数错数量）。
 6. solution 分步写出正确做法，每步一行，用小学生能看懂的话，不要超过 6 步。
 7. answer_band 是该题"答案书写区域"在整张照片中的纵向位置，用 0-100 的百分比表示，例如 [35, 48]；估计不准就给出该题整体的大致范围即可，必须给出数组。
-8. knowledge 用简短知识点标签，如"20以内进位加法""认识钟表""比多少"。`;
+8. knowledge 用简短知识点标签，如"20以内进位加法""认识钟表""比多少"。
+9. 【重要】一行里有多个小题时（比如口算 "505÷5= 6×9= 44×10="、或一组 "12×3= 120×3= 120×30="），
+   必须每一道单独输出成一条，绝对不能合并成一条。填空/选择里有多个空的，也要拆开成多条。`;
 }
 
 export function gradeUserPrompt(grade: string): string {
@@ -21,7 +23,8 @@ export function gradeUserPrompt(grade: string): string {
    "is_correct":true,"correct_answer":"正确答案","error_reason":"错在哪里（对则空字符串）",
    "solution":"正确推导过程，分步","knowledge":"知识点","answer_band":[0,0]}
 ]}
-如果照片里有多道题，按顺序全部输出。如果看不清某题，也要输出，stem 写"(看不清)"，并在 error_reason 里说明。`;
+如果照片里有多道题，按顺序全部输出。同一行的多个小题要拆成多条，不要合并。
+如果看不清某题，也要输出，stem 写"(看不清)"，并在 error_reason 里说明。`;
 }
 
 export function variantsSystemPrompt(grade: string): string {

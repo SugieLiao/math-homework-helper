@@ -104,6 +104,8 @@ interface Settings {
   /** 当前启用的模型源 id（llm_profiles），优先于上面几列 */
   active_vision_profile: string;
   active_text_profile: string;
+  /** fast = 关/低思考（快）；deep = 模型默认长思考（慢，可能超时） */
+  thinking_mode: string;
 }
 
 async function getSettings(env: Env): Promise<Settings> {
@@ -120,6 +122,7 @@ async function getSettings(env: Env): Promise<Settings> {
     text_model: row?.text_model || '',
     active_vision_profile: row?.active_vision_profile || '',
     active_text_profile: row?.active_text_profile || '',
+    thinking_mode: row?.thinking_mode === 'deep' ? 'deep' : 'fast',
   };
 }
 
@@ -238,6 +241,37 @@ interface LlmOptions {
   text?: boolean;
   /** 测试连接时用的临时配置（表单里还没保存的值），非空字段覆盖数据库里的设置 */
   override?: { base?: string; key?: string; model?: string };
+  /**
+   * 思考强度：'fast' = 关思考/低思考（快 3~6 倍，批改一页约 15~30 秒）；
+   * 'deep' = 用模型默认（思考链很长，一页常要 90~120 秒，容易撞网关超时）。
+   * 默认 fast —— 小学数学批改不需要长链推理，慢还会超时失败。
+   */
+  thinking?: 'fast' | 'deep';
+}
+
+/**
+ * 给不同厂商下发「少思考」参数。
+ * 实测（1200x1600 作业图 / 17 题）：
+ *   豆包 doubao-seed-2-1-lite 默认(思考) 119s → 关思考 18.7s
+ *   智谱 glm-5.3-flash        默认(思考) 41s 且正文被思考链吃空 → reasoning_effort=low 30s
+ * 各家参数名不一样，写错会被 400 拒绝，所以外面还有一层「400 就去掉参数重试」的兜底。
+ */
+function applyThinkingParam(body: any, base: string, mode: string): boolean {
+  if (mode !== 'fast') return false;
+  const b = (base || '').toLowerCase();
+  if (b.includes('volces.com') || b.includes('volcengine')) {
+    body.thinking = { type: 'disabled' };
+    return true;
+  }
+  if (b.includes('bigmodel.cn') || b.includes('zhipu') || b.includes('z.ai')) {
+    body.reasoning_effort = 'low';
+    return true;
+  }
+  if (b.includes('dashscope') || b.includes('aliyuncs.com') || b.includes('bailian')) {
+    body.enable_thinking = false;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -266,7 +300,14 @@ function canSeeImages(base: string, model: string): boolean {
   const m = (model || '').toLowerCase().trim();
   const b = (base || '').toLowerCase();
   if (/api\.deepseek\.com/.test(b) || m.includes('deepseek')) return false;
-  if (/^glm-/.test(m)) return /(?:^|[-.\d])v(?:[-_.]|$)/.test(m) || m.includes('vision');
+  if (/^glm-/.test(m)) {
+    // 实测：glm-5.3-flash 能读图（2026-10 用 16x16 纯红图验证，答「红色」）；
+    // glm-5.3 不行（接口直接报 content.type 只支持 text）。所以这里改成「黑名单」——
+    // 只拦有把握的纯文本型号，其余一律放行，免得把能用的配置误拦掉。
+    const textOnly = ['glm-5.3', 'glm-4-plus', 'glm-4-flash', 'glm-4-air', 'glm-4-airx', 'glm-4-long', 'glm-4-9b', 'glm-3-turbo'];
+    if (textOnly.includes(m)) return false;
+    return true;
+  }
   if (/^qwen/.test(m)) return m.includes('vl');
   return true;
 }
@@ -321,16 +362,18 @@ async function llm(
     temperature: opts.temperature ?? 0.2,
     max_tokens: opts.maxTokens ?? 4000,
   };
+  const usedThinkingParam = applyThinkingParam(body, base, opts.thinking || 'fast');
 
   const url = joinUrl(base, 'chat/completions');
+  const headers = {
+    Authorization: `Bearer ${key}`,
+    'Content-Type': 'application/json',
+  };
   let resp: Response;
   try {
     resp = await fetch(url, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${key}`,
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(150000),
     });
@@ -338,8 +381,31 @@ async function llm(
     throw new HttpError(502, `调用大模型失败：${e?.message || e}`);
   }
 
-  const raw = await resp.text();
+  let raw = await resp.text();
+  // 兜底：某些模型/网关不认我们的「少思考」参数，直接 400 拒绝。去掉参数重发一次。
+  if (resp.status === 400 && usedThinkingParam) {
+    delete body.thinking;
+    delete body.reasoning_effort;
+    delete body.enable_thinking;
+    try {
+      resp = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(150000),
+      });
+      raw = await resp.text();
+    } catch (e: any) {
+      throw new HttpError(502, `调用大模型失败：${e?.message || e}`);
+    }
+  }
   if (!resp.ok) {
+    if (resp.status === 524) {
+      throw new HttpError(
+        504,
+        '大模型那边超时了（一页题太多/照片太大，思考链太长）。可以去「设置 → 速度」确认是「快速」，或者换一个更快的模型源后点「重新批改」。',
+      );
+    }
     throw new HttpError(502, `大模型接口返回 ${resp.status}：${raw.slice(0, 300)}`);
   }
   let data: any;
@@ -615,6 +681,7 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     imageType: contentTypeOf(sub.image_key),
     temperature: 0.1,
     maxTokens: 4000,
+    thinking: (s.thinking_mode as any) || 'fast',
   });
 
   let parsed: any;
@@ -626,6 +693,16 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   const list: any[] = Array.isArray(parsed?.questions) ? parsed.questions : [];
   if (!list.length) throw new HttpError(502, '没能从照片里识别出题目，换一张更清楚的再试一次。');
 
+  // 模型经常把 answer_band 给成像素坐标（几百上千）而不是约定的 0-100 百分比。
+  // 取全场最大值做个等比归一，至少保证「相对上下位置」是对的，前端裁剪才不会跑偏。
+  let bandScale = 1;
+  for (const q of list) {
+    const b = Array.isArray(q.answer_band) ? q.answer_band : null;
+    if (!b) continue;
+    for (const v of b) if (typeof v === 'number' && v > bandScale) bandScale = v;
+  }
+  bandScale = bandScale > 100 ? bandScale / 100 : 1;
+
   // 重新批改时先清掉上一轮的题，避免重复
   await env.DB.prepare('DELETE FROM questions WHERE submission_id = ?').bind(id).run();
 
@@ -634,7 +711,14 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   for (const q of list) {
     seq += 1;
     const qid = uuid();
-    const band = Array.isArray(q.answer_band) ? q.answer_band : null;
+    let band: number[] | null = null;
+    if (Array.isArray(q.answer_band) && q.answer_band.length >= 2) {
+      const a = Number(q.answer_band[0]) / bandScale;
+      const b2 = Number(q.answer_band[1]) / bandScale;
+      if (Number.isFinite(a) && Number.isFinite(b2) && b2 > a) {
+        band = [Math.max(0, Math.min(100, Math.round(a))), Math.max(0, Math.min(100, Math.round(b2)))];
+      }
+    }
     await env.DB.prepare(
       `INSERT INTO questions
        (id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
@@ -720,6 +804,7 @@ async function handleApi(
         grade = COALESCE(?, grade),
         student_name = COALESCE(?, student_name),
         passcode = COALESCE(?, passcode),
+        thinking_mode = COALESCE(?, thinking_mode),
         updated_at = ?
        WHERE id = 1`,
     )
@@ -733,6 +818,7 @@ async function handleApi(
         body.grade ?? null,
         body.student_name ?? null,
         body.passcode ?? null,
+        body.thinking_mode ?? null,
         now(),
       )
       .run();
@@ -1107,7 +1193,7 @@ async function handleApi(
         q.error_reason,
         count,
       ),
-      { temperature: 0.8, maxTokens: 3000, text: true },
+      { temperature: 0.8, maxTokens: 3000, text: true, thinking: (s.thinking_mode as any) || 'fast' },
     );
     let parsed: any;
     try {
@@ -1234,7 +1320,13 @@ async function handleApi(
       variantGradeUserPrompt(
         pool.map((v) => ({ id: v.id, label: `${v.seq}`, stem: v.stem })),
       ),
-      { imageBase64: toBase64(buf), imageType: contentTypeOf(key), temperature: 0.1, maxTokens: 3000 },
+      {
+        imageBase64: toBase64(buf),
+        imageType: contentTypeOf(key),
+        temperature: 0.1,
+        maxTokens: 3000,
+        thinking: (s.thinking_mode as any) || 'fast',
+      },
     );
 
     let parsed: any;

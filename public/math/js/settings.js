@@ -24,7 +24,8 @@ const PRESETS = [
   {
     name: '智谱 GLM（视觉模型免费）',
     base: 'https://open.bigmodel.cn/api/paas/v4',
-    // 带 v 的才能读照片（视觉用）；glm-5.3 / glm-5.3-flash 是纯文本模型，只能用于出题/讲解
+    // 实测：glm-5.3-flash 能读图（视觉可用）；glm-5.3 是纯文本，只能出题/讲解。
+    // glm-4.6v-flash / glm-4v-flash 是老一代视觉模型，也能读图。
     models: [
       'glm-4.6v-flash',
       'glm-4.6v',
@@ -139,8 +140,9 @@ export async function renderSettings() {
         </select>
         <input type="text" id="pf_model" placeholder="模型 / ep- 接入点" style="margin-top:6px" />
         <div class="hint">
-          ⚠️ 视觉源必须填<b>能读图的模型</b>（名字里一般带 v / vision / vl）；
-          <code>glm-5.3</code>、<code>glm-5.3-flash</code> 这类纯文本模型只能存成「文本」用途。
+          ⚠️ 视觉源必须填<b>能读图的模型</b>（名字里一般带 v / vision / vl）。
+          <code>glm-5.3</code>（不带 flash）是纯文本模型，只能存成「文本」用途；
+          <code>glm-5.3-flash</code> 实测能读图，可以做视觉源。
         </div>
       </div>
       <div class="field">
@@ -154,6 +156,23 @@ export async function renderSettings() {
         <button class="btn" id="btn-pf-cancel" style="display:none">取消编辑</button>
         <button class="btn primary" id="btn-pf-save">保存到模型源库</button>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>速度 / 质量</h3>
+      <div class="field">
+        <label>思考强度</label>
+        <select id="thinking_mode">
+          <option value="fast" ${s.thinking_mode !== 'deep' ? 'selected' : ''}>快速（推荐 · 一页 15~30 秒）</option>
+          <option value="deep" ${s.thinking_mode === 'deep' ? 'selected' : ''}>深度思考（更细，但一页 90~120 秒，常常超时失败）</option>
+        </select>
+        <div class="hint">
+          很多模型（豆包 seed-2-1、智谱 GLM-5.3 等）默认会先在心里打一大段草稿再作答，
+          一页作业要 90~120 秒，容易撞上网关超时而失败——这就是之前「批改出错」的原因。
+          选「快速」会关掉/压低这段草稿，实测同一页作业从 119 秒降到 18 秒，判题一样准。
+        </div>
+      </div>
+      <div class="row-end"><button class="btn primary" id="btn-save3">保存</button></div>
     </div>
 
     <div class="card">
@@ -354,6 +373,18 @@ export async function renderSettings() {
   renderProfiles();
 
   /* ------------------------------------------------------------ 学生 / 口令 */
+  document.getElementById('btn-save3').onclick = async () => {
+    try {
+      busy('保存中…');
+      await api.post('/settings', { thinking_mode: document.getElementById('thinking_mode').value });
+      idle();
+      toast('已保存');
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
+
   document.getElementById('btn-save2').onclick = async () => {
     const body = {
       grade: document.getElementById('grade').value,

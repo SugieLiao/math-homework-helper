@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS settings (
   -- 当前启用的「模型源」id（见 llm_profiles）。优先于上面 base_url/api_key/model 的旧写法
   active_vision_profile TEXT DEFAULT '',
   active_text_profile   TEXT DEFAULT '',
+  -- 思考强度：fast = 关/低思考（一页 15~30 秒）；deep = 用模型默认（90~120 秒，可能超时）
+  thinking_mode TEXT DEFAULT 'fast',
   updated_at    TEXT
 );
 

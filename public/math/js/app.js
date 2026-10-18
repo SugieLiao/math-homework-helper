@@ -350,7 +350,7 @@ async function submission(id) {
   if (reBtn) {
     reBtn.onclick = async () => {
       try {
-        busy('老师正在批改…（大约 20～90 秒）');
+        busy('老师正在批改…（快速模式约 15～40 秒）');
         await withTimeout(api.post(`/homework/${id}/grade`, {}), 180000);
         idle();
         toast('批改完成');
@@ -474,7 +474,7 @@ async function handleHomeworkFile(input) {
     const lessonId = pickEl ? pickEl.value : '';
     const up = await api.upload('/homework/upload', small, lessonId ? { lesson_id: lessonId } : {});
     subId = up.id;
-    busy('老师正在批改…（一页作业大约 20～90 秒，别关页面）');
+    busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
     // 批改是长请求，加硬超时，避免界面无限转圈
     const graded = await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
     // 裁剪每题的作答图（用转码后的 JPEG 裁，HEIC 浏览器解不开）
