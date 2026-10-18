@@ -164,6 +164,20 @@ pre.sol { white-space: pre-wrap; font: inherit; margin: 0; }
 .p-stem { font-size: 17px; margin: 6px 0 10px; }
 .p-blank { height: 110px; border: 1px solid #333; border-radius: 6px; background: repeating-linear-gradient(#fff, #fff 27px, #dfe6f2 28px); }
 .p-blank.tall { height: 150px; }
+.p-blank-3 { height: 110px; }
+.p-blank-5 { height: 176px; }
+.ph-title { font-size: 20px; font-weight: 700; text-align: center; margin-bottom: 4px; }
+
+/* ---------------- 错题本 / 组卷 ---------------- */
+.wrong-item { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.wrong-item:last-child { border-bottom: none; }
+.pick-all { font-size: 13px; color: var(--ink-2); cursor: pointer; }
+
+.paper-item { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; background: #fff; }
+.paper-item.dragging { opacity: .45; border-style: dashed; }
+.pi-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.drag-handle { cursor: grab; color: var(--ink-3); font-size: 15px; letter-spacing: -2px; user-select: none; padding: 0 2px; }
+.paper-item.hide-answer .stem + .small { display: none; }
 
 @media (max-width: 600px) {
   main { padding: 12px 10px 70px; }

@@ -118,3 +118,30 @@ CREATE TABLE IF NOT EXISTS variants (
 );
 
 CREATE INDEX IF NOT EXISTS idx_variants_parent ON variants (parent_id);
+
+-- 组卷：从错题本里选若干道错题，每道出 N 道类似题，凑成一张练习卷
+CREATE TABLE IF NOT EXISTS papers (
+  id          TEXT PRIMARY KEY,
+  title       TEXT NOT NULL,          -- 卷子标题，如「错题练习卷 10-18」
+  ordered     INTEGER DEFAULT 1,      -- 1 = 按错题顺序组卷；0 = 乱序
+  status      TEXT DEFAULT 'draft',   -- draft = 还在编辑；final = 已确认组卷
+  per_question INTEGER DEFAULT 2,     -- 每道错题出几道类似题
+  created_at  TEXT,
+  updated_at  TEXT
+);
+
+CREATE TABLE IF NOT EXISTS paper_items (
+  id            TEXT PRIMARY KEY,
+  paper_id      TEXT NOT NULL,
+  pos           INTEGER DEFAULT 0,    -- 卷内顺序，用户可拖动改
+  stem          TEXT,
+  answer        TEXT,
+  solution      TEXT,
+  difficulty    TEXT,                 -- 略易 / 同等 / 略难
+  knowledge     TEXT,
+  source_question_id TEXT,            -- 来自哪道错题（母题）
+  source_no     TEXT,                 -- 来源题号，打印时标注用
+  created_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_items_paper ON paper_items (paper_id);

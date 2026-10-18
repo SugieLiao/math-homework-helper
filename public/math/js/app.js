@@ -429,25 +429,213 @@ async function submission(id) {
 }
 
 /* ------------------------------------------------ 错题本 */
+/* 错题本：按「教材 → 单元 → 课文」分组，组标题上带全选框（可整课 / 整单元选中组卷） */
 async function wrongBook() {
   view.innerHTML = `<div class="empty">加载中…</div>`;
   let data;
+  let textbooks = [];
+  let units = [];
   try {
-    data = await api.get('/questions');
+    [data] = await Promise.all([api.get('/questions')]);
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
-  const all = data.questions || [];
-  const unpassed = all.filter((q) => !q.mastery.passed);
-  const wrongOnly = all.filter((q) => q.mastery.base_wrong);
+  try {
+    textbooks = (await api.get('/textbooks')).textbooks || [];
+    const remember = localStorage.getItem(TB_KEY);
+    const tbId = remember && textbooks.some((t) => t.id === remember) ? remember : textbooks[0]?.id || '';
+    units = (await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook')).units || [];
+  } catch (e) { /* 大纲拉不到也能用 */ }
+
+  const all = (data.questions || []).map((q) => ({ ...q, wrong: !!q.mastery.base_wrong }));
+  const wrongs = all.filter((q) => q.wrong);
+
+  // 课文 / 单元 id → 名字（未归类的单独一块）
+  const lessonName = new Map();
+  const unitName = new Map();
+  units.forEach((u) => {
+    unitName.set(u.id, u.name);
+    u.lessons.forEach((l) => lessonName.set(l.id, l.name));
+  });
+  const groupOf = (q) => ({
+    uKey: q.unit_id || '__none',
+    uName: q.unit_name || '未归类',
+    lKey: q.lesson_id || '__none',
+    lName: q.lesson_name || '未归类',
+  });
+
+  const blocks = [];
+  const seen = new Map();
+  wrongs.forEach((q) => {
+    const g = groupOf(q);
+    const key = `${g.uKey}||${g.lKey}`;
+    if (!seen.has(key)) {
+      seen.set(key, { ...g, items: [] });
+      blocks.push(seen.get(key));
+    }
+    seen.get(key).items.push(q);
+  });
+
+  const wrongQCard = (q) => `
+    <div class="wrong-item" data-q="${q.id}">
+      <input type="checkbox" class="wcheck" data-id="${q.id}" style="width:20px;height:20px;flex:0 0 auto" />
+      <div style="flex:1;min-width:0">
+        <div class="row wrap">
+          <span class="q-no">${esc(q.no)}.</span>
+          <span class="badge wrong">做错了</span>
+          ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
+          <span class="spacer"></span>
+          ${masteryBadge(q.mastery)}
+        </div>
+        <div class="stem" style="margin:4px 0">${nl2br(q.stem)}</div>
+        <div class="answer-line">作答：<b>${esc(q.student_answer || '（空白）')}</b> · 正确答案：<b>${esc(q.correct_answer)}</b></div>
+        ${q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
+        <div class="row wrap">
+          <span class="small muted">来源：${fmtDate(q.sub_created_at)} 的作业${q.lesson_name ? ` · ${esc(q.lesson_name)}` : q.unit_name ? ` · ${esc(q.unit_name)}` : ' · 未归类'}</span>
+          <span class="spacer"></span>
+          <a class="btn sm" href="#/q/${q.id}">举一反三</a>
+        </div>
+      </div>
+    </div>`;
+
+  let html = '';
+  let lastUnit = null;
+  blocks.forEach((b) => {
+    if (b.uKey !== lastUnit) {
+      if (lastUnit !== null) html += `</div>`;
+      const unitIds = blocks.filter((x) => x.uKey === b.uKey).flatMap((x) => x.items.map((i) => i.id));
+      html += `<div class="row wrap" style="margin-top:16px">
+          <div class="section-title" style="margin:0">${esc(b.uName)}</div>
+          <span class="spacer"></span>
+          <label class="pick-all">全选本单元（${unitIds.length}）<input type="checkbox" class="ucheck" data-ids="${unitIds.join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
+        </div><div class="card" style="padding:0">`;
+      lastUnit = b.uKey;
+    }
+    html += `<div class="row wrap" style="padding:8px 10px;background:#f7f9ff;border-bottom:1px solid var(--line)">
+        <b>${esc(b.lName)}</b>
+        <span class="small muted">${b.items.length} 道错题</span>
+        <span class="spacer"></span>
+        <label class="pick-all">全选本课<input type="checkbox" class="lcheck" data-ids="${b.items.map((i) => i.id).join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
+      </div>`;
+    html += b.items.map(wrongQCard).join('');
+  });
+  if (blocks.length) html += `</div>`;
+
   view.innerHTML = `
     <h2>错题本</h2>
-    <div class="section-title">还没过关（${unpassed.length}）</div>
-    ${unpassed.length ? unpassed.map(qCard).join('') : '<div class="empty">全部过关啦 🎉</div>'}
-    <div class="section-title">曾经做错（${wrongOnly.length}）</div>
-    ${wrongOnly.length ? wrongOnly.map(qCard).join('') : '<div class="empty">没有错题记录</div>'}`;
-  bindCards();
+    <div class="card noprint">
+      <div class="row wrap">
+        <b>已选 <span id="sel-count">0</span> 道错题</b>
+        <span class="spacer"></span>
+        <button class="btn sm" id="btn-w-all">全选</button>
+        <button class="btn sm" id="btn-w-none">清空</button>
+        <button class="btn primary" id="btn-make-paper">📝 错题组卷</button>
+      </div>
+      <div class="hint">勾选题目（可以按课文或整个单元批量选），点「错题组卷」，老师会为每道错题出几道类似题，凑成一张可打印的练习卷。</div>
+    </div>
+    ${wrongs.length ? html : '<div class="empty">还没有错题记录</div>'}`;
+
+  const boxes = () => Array.from(view.querySelectorAll('.wcheck'));
+  const refreshCount = () => {
+    document.getElementById('sel-count').textContent = String(boxes().filter((b) => b.checked).length);
+  };
+  boxes().forEach((cb) => (cb.onchange = refreshCount));
+  const setIds = (ids, on) => {
+    boxes().forEach((b) => {
+      if (ids.includes(b.dataset.id)) b.checked = on;
+    });
+    refreshCount();
+  };
+  view.querySelectorAll('.lcheck').forEach((cb) => {
+    cb.onchange = () => setIds((cb.dataset.ids || '').split(',').filter(Boolean), cb.checked);
+  });
+  view.querySelectorAll('.ucheck').forEach((cb) => {
+    cb.onchange = () => setIds((cb.dataset.ids || '').split(',').filter(Boolean), cb.checked);
+  });
+  document.getElementById('btn-w-all').onclick = () => {
+    boxes().forEach((b) => (b.checked = true));
+    view.querySelectorAll('.lcheck,.ucheck').forEach((c) => (c.checked = true));
+    refreshCount();
+  };
+  document.getElementById('btn-w-none').onclick = () => {
+    boxes().forEach((b) => (b.checked = false));
+    view.querySelectorAll('.lcheck,.ucheck').forEach((c) => (c.checked = false));
+    refreshCount();
+  };
+  refreshCount();
+  document.getElementById('btn-make-paper').onclick = () => {
+    const ids = boxes().filter((b) => b.checked).map((b) => b.dataset.id);
+    if (!ids.length) return toast('先勾选要做卷的错题');
+    paperDialog(ids);
+  };
+}
+
+/* 组卷设置弹窗：每道错题出几道 + 顺序/乱序 + 标题 */
+function paperDialog(questionIds) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal';
+  const d = new Date();
+  const defTitle = `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  wrap.innerHTML = `
+    <div class="modal-card">
+      <h3>错题组卷</h3>
+      <p class="small muted" style="margin-top:-6px">已选 ${questionIds.length} 道错题</p>
+      <div class="field">
+        <label>每道错题出几道类似题</label>
+        <select id="pp-per">
+          <option value="1">1 道</option>
+          <option value="2" selected>2 道</option>
+          <option value="3">3 道</option>
+          <option value="4">4 道</option>
+          <option value="5">5 道</option>
+        </select>
+        <div class="hint">卷子一共大约 ${questionIds.length * 2} 道题</div>
+      </div>
+      <div class="field">
+        <label>题目顺序</label>
+        <select id="pp-order">
+          <option value="1">顺序（按错题原顺序排）</option>
+          <option value="0">乱序（打乱后排出）</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>卷子标题</label>
+        <input type="text" id="pp-title" value="${esc(defTitle)}" />
+      </div>
+      <div class="row-end">
+        <button class="btn" id="pp-cancel">取消</button>
+        <button class="btn primary" id="pp-go">开始组卷</button>
+      </div>
+    </div>`;
+  document.body.appendChild(wrap);
+  const close = () => wrap.remove();
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) close();
+  });
+  wrap.querySelector('#pp-cancel').onclick = close;
+  wrap.querySelector('#pp-per').onchange = (e) => {
+    wrap.querySelector('.hint').textContent = `卷子一共大约 ${questionIds.length * Number(e.target.value)} 道题`;
+  };
+  wrap.querySelector('#pp-go').onclick = async () => {
+    const body = {
+      question_ids: questionIds,
+      per: Number(wrap.querySelector('#pp-per').value),
+      ordered: Number(wrap.querySelector('#pp-order').value),
+      title: wrap.querySelector('#pp-title').value.trim(),
+    };
+    close();
+    try {
+      busy(`老师在出卷…（${questionIds.length} 道错题，大约 30 秒）`);
+      const r = await withTimeout(api.post('/papers', body), 150000);
+      idle();
+      toast(`出了 ${r.count} 道题`);
+      location.hash = `#/paper/${r.id}`;
+    } catch (e) {
+      idle();
+      toast(e.message, 6000);
+    }
+  };
 }
 
 /* ------------------------------------------------ 改判弹窗 */
@@ -520,6 +708,210 @@ function bindCards() {
   });
 }
 
+/* ------------------------------------------------ 试卷（错题组卷） */
+async function renderPaper(id) {
+  view.innerHTML = `<div class="empty">加载中…</div>`;
+  let d;
+  try {
+    d = await api.get(`/papers/${id}`);
+  } catch (e) {
+    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  const paper = d.paper;
+  let items = d.items || [];
+
+  const itemHtml = (it, i) => `
+    <div class="paper-item" data-id="${it.id}" draggable="true">
+      <div class="pi-head">
+        <span class="drag-handle" title="按住拖动改顺序">⋮⋮</span>
+        <input type="checkbox" class="pcheck" data-id="${it.id}" style="width:20px;height:20px" />
+        <b>${i + 1}.</b>
+        <span class="badge gray">${esc(it.difficulty || '同等')}</span>
+        ${it.knowledge ? `<span class="badge gray">${esc(it.knowledge)}</span>` : ''}
+        <span class="spacer"></span>
+        <span class="small muted">来自错题 ${esc(it.source_no || '')}</span>
+      </div>
+      <div class="stem" style="margin:4px 0">${nl2br(it.stem)}</div>
+      <div class="small muted">答案：${esc(it.answer)}</div>
+    </div>`;
+
+  view.innerHTML = `
+    <div class="card noprint">
+      <div class="row wrap">
+        <h2 style="margin:0">${esc(paper.title)}</h2>
+        <span class="badge ${paper.status === 'final' ? 'pass' : 'gray'}">${paper.status === 'final' ? '已组卷' : '草稿'}</span>
+        <span class="spacer"></span>
+        <span class="small muted">共 <b id="pi-count">${items.length}</b> 题 · 已选 <span id="pi-sel">0</span></span>
+      </div>
+      <div class="row wrap" style="margin-top:10px">
+        <button class="btn sm" id="pi-all">全选</button>
+        <button class="btn sm" id="pi-none">清空</button>
+        <button class="btn danger sm" id="pi-del">删除所选</button>
+        <span class="spacer"></span>
+        <button class="btn sm" id="pi-shuffle">🔀 一键乱序</button>
+        <button class="btn sm" id="pi-answer">👁 显示/隐藏答案</button>
+        <button class="btn primary" id="pi-final">✔ 确认组卷</button>
+        <button class="btn primary" id="pi-print">🖨 打印试卷</button>
+      </div>
+      <div class="hint">按住左侧的 ⋮⋮ 可以拖动改题目顺序；勾选题目可删掉不要的；确认组卷后再打印。</div>
+    </div>
+    <div id="pi-list">${items.length ? items.map(itemHtml).join('') : '<div class="empty">这张卷子一道题都没有了</div>'}</div>`;
+
+  const boxes = () => Array.from(view.querySelectorAll('.pcheck'));
+  const refreshSel = () => {
+    document.getElementById('pi-sel').textContent = String(boxes().filter((b) => b.checked).length);
+  };
+  boxes().forEach((b) => (b.onchange = refreshSel));
+  document.getElementById('pi-all').onclick = () => {
+    boxes().forEach((b) => (b.checked = true));
+    refreshSel();
+  };
+  document.getElementById('pi-none').onclick = () => {
+    boxes().forEach((b) => (b.checked = false));
+    refreshSel();
+  };
+  document.getElementById('pi-answer').onclick = () => {
+    view.querySelectorAll('.paper-item').forEach((el) => el.classList.toggle('hide-answer'));
+  };
+
+  const reload = async () => {
+    const nd = await api.get(`/papers/${id}`);
+    items = nd.items || [];
+    document.getElementById('pi-list').innerHTML = items.length
+      ? items.map(itemHtml).join('')
+      : '<div class="empty">这张卷子一道题都没有了</div>';
+    document.getElementById('pi-count').textContent = String(items.length);
+    boxes().forEach((b) => (b.onchange = refreshSel));
+    refreshSel();
+    bindDrag();
+  };
+
+  document.getElementById('pi-del').onclick = async () => {
+    const ids = boxes().filter((b) => b.checked).map((b) => b.dataset.id);
+    if (!ids.length) return toast('先勾选要删掉的题');
+    if (!confirm(`删掉这 ${ids.length} 道题？`)) return;
+    try {
+      busy('删除中…');
+      await api.del(`/papers/${id}/items`, { ids });
+      idle();
+      await reload();
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
+
+  document.getElementById('pi-shuffle').onclick = async () => {
+    try {
+      busy('打乱中…');
+      await api.post(`/papers/${id}/shuffle`, {});
+      idle();
+      await reload();
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
+
+  document.getElementById('pi-final').onclick = async () => {
+    try {
+      busy('保存中…');
+      await api.post(`/papers/${id}/finalize`, { title: paper.title });
+      idle();
+      toast('已确认组卷，可以打印了');
+      await renderPaper(id);
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
+
+  document.getElementById('pi-print').onclick = () => (location.hash = `#/paper-print/${id}`);
+
+  /* 拖拽排序 */
+  function bindDrag() {
+    const list = document.getElementById('pi-list');
+    let dragEl = null;
+    list.querySelectorAll('.paper-item').forEach((el) => {
+      el.addEventListener('dragstart', () => {
+        dragEl = el;
+        el.classList.add('dragging');
+      });
+      el.addEventListener('dragend', () => {
+        el.classList.remove('dragging');
+        dragEl = null;
+        // 拖完按 DOM 顺序落库
+        const ids = Array.from(list.querySelectorAll('.paper-item')).map((x) => x.dataset.id);
+        api.post(`/papers/${id}/reorder`, { ids }).then(() => {
+          Array.from(list.querySelectorAll('.paper-item')).forEach((x, i) => {
+            const b = x.querySelector('b');
+            if (b) b.textContent = `${i + 1}.`;
+          });
+        });
+      });
+      el.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        if (!dragEl || dragEl === el) return;
+        const rect = el.getBoundingClientRect();
+        const after = e.clientY - rect.top > rect.height / 2;
+        list.insertBefore(dragEl, after ? el.nextSibling : el);
+      });
+    });
+  }
+  bindDrag();
+}
+
+/* 打印试卷：每题留答题空白，答案不给（避免孩子直接抄） */
+async function renderPaperPrint(id) {
+  view.innerHTML = `<div class="empty">加载中…</div>`;
+  let d;
+  try {
+    d = await api.get(`/papers/${id}`);
+  } catch (e) {
+    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  const paper = d.paper;
+  const items = d.items || [];
+  if (!items.length) {
+    view.innerHTML = `<div class="empty">这张卷子还没有题目<br/><a class="btn" href="#/paper/${id}" style="margin-top:12px">回去加题</a></div>`;
+    return;
+  }
+  const lines = (it) => (String(it.difficulty || '').includes('略难') ? 5 : 3);
+  view.innerHTML = `
+    <div class="card noprint">
+      <div class="row wrap">
+        <h3 style="margin:0">共 ${items.length} 题，确认后打印</h3>
+        <span class="spacer"></span>
+        <button class="btn primary" onclick="window.print()">🖨 打印</button>
+        <a class="btn" href="#/paper/${id}">返回编辑</a>
+      </div>
+      <div class="hint">试卷只印题干和空白，答案不会出现在纸上。做完拍照上传批改，或家长对照网页上的答案看。</div>
+    </div>
+    <div class="card">
+      <div class="print-head">
+        <div class="ph-title">${esc(paper.title)}</div>
+        <div class="row" style="font-size:14px;margin-top:6px">
+          <span>姓名：<u>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</u></span>
+          <span class="spacer"></span>
+          <span>日期：<u>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</u></span>
+          <span class="spacer"></span>
+          <span>用时：<u>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;</u> 分钟</span>
+        </div>
+      </div>
+      ${items
+        .map(
+          (it, i) => `
+        <div class="p-item">
+          <div><b>${i + 1}.</b> <span class="p-stem">${nl2br(it.stem)}</span></div>
+          <div class="p-blank p-blank-${lines(it)}"></div>
+        </div>`,
+        )
+        .join('')}
+    </div>`;
+}
+
 /* ------------------------------------------------ 上传作业 */
 // 两个入口：直接拍照 capture=environment / 从相册选（不带 capture）
 const fileInput = document.getElementById('file-homework');
@@ -571,7 +963,10 @@ async function route() {
   const hash = location.hash.replace(/^#/, '') || '/';
   document.querySelectorAll('.topnav a').forEach((a) => {
     const nav = a.dataset.nav;
-    const active = nav === '/' ? hash === '/' || hash.startsWith('/s/') || hash.startsWith('/q/') || hash.startsWith('/print/') : hash.startsWith(nav);
+    const active =
+      nav === '/'
+        ? hash === '/' || hash.startsWith('/s/') || hash.startsWith('/q/') || hash.startsWith('/print/') || hash.startsWith('/paper')
+        : hash.startsWith(nav);
     a.classList.toggle('active', active);
   });
 
@@ -582,6 +977,8 @@ async function route() {
     if (hash.startsWith('/s/')) return await submission(hash.slice(3));
     if (hash.startsWith('/q/')) return await renderQuestion(hash.slice(3));
     if (hash.startsWith('/print/')) return await renderPrint(hash.slice(7));
+    if (hash.startsWith('/paper-print/')) return await renderPaperPrint(hash.slice('/paper-print/'.length));
+    if (hash.startsWith('/paper/')) return await renderPaper(hash.slice('/paper/'.length));
     if (hash.startsWith('/wrong')) return await wrongBook();
     if (hash.startsWith('/settings')) return await renderSettings();
     view.innerHTML = '<div class="empty">页面不存在</div>';

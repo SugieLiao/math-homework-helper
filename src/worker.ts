@@ -12,6 +12,8 @@ import {
   variantsUserPrompt,
   variantGradeSystemPrompt,
   variantGradeUserPrompt,
+  paperSystemPrompt,
+  paperUserPrompt,
 } from './prompts';
 
 export interface Env {
@@ -272,6 +274,26 @@ function applyThinkingParam(body: any, base: string, mode: string): boolean {
     return true;
   }
   return false;
+}
+
+/** Fisher-Yates 洗牌，直接改原数组并返回（省一次拷贝） */
+function shuffleInPlace<T>(arr: T[]): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+/** 删题后把 pos 重新收紧成 0,1,2…，避免出现跳号 */
+async function renumberPaper(env: Env, paperId: string): Promise<void> {
+  const rows = await env.DB.prepare('SELECT id FROM paper_items WHERE paper_id = ? ORDER BY pos ASC, created_at ASC')
+    .bind(paperId)
+    .all<any>();
+  const list = rows.results || [];
+  for (let i = 0; i < list.length; i++) {
+    await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ?').bind(i, list[i].id).run();
+  }
 }
 
 /**
@@ -1053,11 +1075,37 @@ async function handleApi(
   /* --------------------------------------------------------- 题目读写 */
   if (p === '/questions' && method === 'GET') {
     const filter = url.searchParams.get('filter'); // all | wrong | unpassed
+    // 带上作业归属（教材 / 单元 / 课文），错题本才能按单元课文分组、并注明来源
     let sql =
-      `SELECT q.*, s.created_at AS sub_created_at, s.image_key AS sub_image_key
-       FROM questions q LEFT JOIN submissions s ON s.id = q.submission_id
-       ORDER BY s.created_at DESC, q.seq ASC`;
-    const rows = await env.DB.prepare(sql).all<any>();
+      `SELECT q.*, s.created_at AS sub_created_at, s.image_key AS sub_image_key,
+              s.lesson_id AS lesson_id, l.name AS lesson_name,
+              u.id AS unit_id, u.name AS unit_name,
+              t.id AS textbook_id, t.name AS textbook_name
+       FROM questions q
+       LEFT JOIN submissions s ON s.id = q.submission_id
+       LEFT JOIN lessons l ON l.id = s.lesson_id
+       LEFT JOIN units u ON u.id = l.unit_id
+       LEFT JOIN textbooks t ON t.id = u.textbook_id
+       WHERE 1=1`;
+    const binds: any[] = [];
+    const qLesson = (url.searchParams.get('lesson') || '').trim();
+    const qUnit = (url.searchParams.get('unit') || '').trim();
+    const qTb = (url.searchParams.get('textbook') || '').trim();
+    if (qLesson === '__none') {
+      sql += ' AND s.lesson_id IS NULL';
+    } else if (qLesson) {
+      sql += ' AND s.lesson_id = ?';
+      binds.push(qLesson);
+    } else if (qUnit) {
+      sql += ' AND l.unit_id = ?';
+      binds.push(qUnit);
+    } else if (qTb) {
+      // 同 submissions 列表：按教材筛时把未归类的也带上，否则会凭空少一批错题
+      sql += ' AND (u.textbook_id = ? OR s.lesson_id IS NULL)';
+      binds.push(qTb);
+    }
+    sql += ' ORDER BY s.created_at DESC, q.seq ASC';
+    const rows = await env.DB.prepare(sql).bind(...binds).all<any>();
     const all = rows.results || [];
     const withMastery = await Promise.all(all.map((r) => questionWithMastery(env, r)));
     const filtered = withMastery.filter((q) => {
@@ -1066,6 +1114,182 @@ async function handleApi(
       return true;
     });
     return json({ questions: filtered });
+  }
+
+  /* ------------------------------------------------------------ 组卷 */
+  // 列出历史卷子
+  if (p === '/papers' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      `SELECT p.*, (SELECT COUNT(*) FROM paper_items i WHERE i.paper_id = p.id) AS item_count
+       FROM papers p ORDER BY p.created_at DESC LIMIT 50`,
+    ).all<any>();
+    return json({ papers: rows.results || [] });
+  }
+
+  // 组卷：一次 LLM 调用把所有错题的类似题都出出来（分多次调用会撞网关超时）
+  if (p === '/papers' && method === 'POST') {
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
+    if (!ids.length) throw new HttpError(400, '先在错题本里勾选要做卷的错题');
+    const per = Math.min(Math.max(Number(body.per) || 2, 1), 5);
+    const ordered = body.ordered === false || body.ordered === 0 ? 0 : 1;
+    const s = await getSettings(env);
+
+    const qs: any[] = [];
+    for (const id of ids) {
+      const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(id).first<any>();
+      if (q) qs.push(q);
+    }
+    if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新错题本再试');
+    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道错题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
+
+    const text = await llm(
+      env,
+      paperSystemPrompt(s.grade),
+      paperUserPrompt(
+        qs.map((q, i) => ({
+          index: i + 1,
+          no: String(q.no ?? i + 1),
+          stem: String(q.stem || ''),
+          correctAnswer: String(q.correct_answer || ''),
+          knowledge: String(q.knowledge || ''),
+          errorReason: String(q.error_reason || ''),
+        })),
+        per,
+      ),
+      { temperature: 0.8, maxTokens: 6000, text: true, thinking: (s.thinking_mode as any) || 'fast' },
+    );
+
+    let parsed: any;
+    try {
+      parsed = extractJson(text);
+    } catch {
+      throw new HttpError(502, `老师没出好题：${text.slice(0, 200)}`);
+    }
+    const rawItems: any[] = Array.isArray(parsed?.items) ? parsed.items : [];
+    if (!rawItems.length) throw new HttpError(502, '一道题都没出出来，再点一次「组卷」试试。');
+
+    const nowIso = now();
+    const paperId = uuid();
+    const d = new Date();
+    const title =
+      String(body.title || '').trim() ||
+      `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    await env.DB.prepare(
+      `INSERT INTO papers (id, title, ordered, status, per_question, created_at, updated_at)
+       VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
+    )
+      .bind(paperId, title.slice(0, 60), ordered, per, nowIso, nowIso)
+      .run();
+
+    // 按 source_index 归拢；认不出来的丢进最后一组，保证出题结果不丢题
+    const buckets = new Map<number, any[]>();
+    rawItems.forEach((it) => {
+      const idx = Number(it.source_index);
+      const key = Number.isFinite(idx) && idx >= 1 && idx <= qs.length ? idx : qs.length;
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key)!.push(it);
+    });
+
+    const rows: any[] = [];
+    for (let i = 1; i <= qs.length; i++) {
+      const src = qs[i - 1];
+      for (const it of buckets.get(i) || []) {
+        rows.push({
+          srcId: src.id,
+          srcNo: String(src.no ?? i),
+          stem: String(it.stem || ''),
+          answer: String(it.answer ?? ''),
+          solution: String(it.solution ?? ''),
+          difficulty: String(it.difficulty || '同等'),
+          knowledge: String(it.knowledge || src.knowledge || ''),
+        });
+      }
+    }
+    if (ordered === 0) shuffleInPlace(rows);
+
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i];
+      await env.DB.prepare(
+        `INSERT INTO paper_items (id, paper_id, pos, stem, answer, solution, difficulty, knowledge, source_question_id, source_no, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+        .bind(uuid(), paperId, i, r.stem, r.answer, r.solution, r.difficulty, r.knowledge, r.srcId, r.srcNo, nowIso)
+        .run();
+    }
+    return json({ id: paperId, title, count: rows.length });
+  }
+
+  if (p.startsWith('/papers/') && method === 'GET') {
+    const pid = p.slice('/papers/'.length);
+    if (pid.includes('/')) return null;
+    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
+    if (!paper) throw new HttpError(404, '卷子不存在');
+    const items = await env.DB.prepare('SELECT * FROM paper_items WHERE paper_id = ? ORDER BY pos ASC, created_at ASC')
+      .bind(pid)
+      .all<any>();
+    return json({ paper, items: items.results || [] });
+  }
+
+  // 删除卷子里的题目
+  if (p.startsWith('/papers/') && p.endsWith('/items') && method === 'DELETE') {
+    const pid = p.slice('/papers/'.length, -'/items'.length);
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) throw new HttpError(400, '先勾选要删掉的题');
+    for (const id of ids) {
+      await env.DB.prepare('DELETE FROM paper_items WHERE id = ? AND paper_id = ?').bind(id, pid).run();
+    }
+    await renumberPaper(env, pid);
+    return json({ ok: true });
+  }
+
+  // 拖动排序：按传入的 id 顺序重写 pos
+  if (p.startsWith('/papers/') && p.endsWith('/reorder') && method === 'POST') {
+    const pid = p.slice('/papers/'.length, -'/reorder'.length);
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) throw new HttpError(400, '没有收到新顺序');
+    for (let i = 0; i < ids.length; i++) {
+      await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ? AND paper_id = ?')
+        .bind(i, ids[i], pid)
+        .run();
+    }
+    return json({ ok: true });
+  }
+
+  // 一键乱序
+  if (p.startsWith('/papers/') && p.endsWith('/shuffle') && method === 'POST') {
+    const pid = p.slice('/papers/'.length, -'/shuffle'.length);
+    const rows = await env.DB.prepare('SELECT id FROM paper_items WHERE paper_id = ? ORDER BY pos ASC').bind(pid).all<any>();
+    const ids = shuffleInPlace((rows.results || []).map((r: any) => r.id));
+    for (let i = 0; i < ids.length; i++) {
+      await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ? AND paper_id = ?').bind(i, ids[i], pid).run();
+    }
+    await env.DB.prepare("UPDATE papers SET ordered = 0, updated_at = ? WHERE id = ?").bind(now(), pid).run();
+    return json({ ok: true });
+  }
+
+  // 确认组卷
+  if (p.startsWith('/papers/') && p.endsWith('/finalize') && method === 'POST') {
+    const pid = p.slice('/papers/'.length, -'/finalize'.length);
+    const body = await req.json<any>().catch(() => ({}));
+    const title = String(body.title || '').trim();
+    if (title) {
+      await env.DB.prepare('UPDATE papers SET status = ?, title = ?, updated_at = ? WHERE id = ?')
+        .bind('final', title.slice(0, 60), now(), pid)
+        .run();
+    } else {
+      await env.DB.prepare('UPDATE papers SET status = ?, updated_at = ? WHERE id = ?').bind('final', now(), pid).run();
+    }
+    return json({ ok: true });
+  }
+
+  if (p.startsWith('/papers/') && method === 'DELETE') {
+    const pid = p.slice('/papers/'.length);
+    await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ?').bind(pid).run();
+    await env.DB.prepare('DELETE FROM papers WHERE id = ?').bind(pid).run();
+    return json({ ok: true });
   }
 
   if (p === '/submissions' && method === 'GET') {

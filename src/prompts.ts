@@ -56,6 +56,36 @@ export function variantsUserPrompt(
 {"variants":[{"stem":"题目","answer":"答案","solution":"分步讲解","difficulty":"略易|同等|略难"}]}`;
 }
 
+export function paperSystemPrompt(grade: string): string {
+  return `你是小学数学教研老师，正在给${grade}学生出一张"错题练习卷"。
+你会拿到若干道学生做错的题（母题），需要针对每一道出几道同类新题。
+要求：
+1. 只输出 JSON，不要输出 markdown 代码块、不要输出任何解释性文字。
+2. 每道母题出的新题，必须考查同一个知识点、同一种解法，但数字和情境要换新的，绝不能和母题一模一样。
+3. source_index 必须和你拿到的母题编号严格对应，不能错位。
+4. 难度按"略易 → 同等 → 略难"循环；略易就是数字更小更直接，略难就是多一步或换个情境。
+5. 题目表述要符合${grade}的识字水平，不要超纲。
+6. answer 只给最终答案，solution 给分步讲解，每步一行，不超过 5 步。`;
+}
+
+export function paperUserPrompt(
+  questions: { index: number; no: string; stem: string; correctAnswer: string; knowledge: string; errorReason: string }[],
+  per: number,
+): string {
+  const list = questions
+    .map(
+      (q) =>
+        `- source_index=${q.index} 题号=${q.no || q.index} 题目=${q.stem}\n  正确答案：${q.correctAnswer}\n  知识点：${q.knowledge || '（未标注）'}\n  学生错在哪：${q.errorReason || '（未说明）'}`,
+    )
+    .join('\n');
+  return `下面是学生做错的题：
+${list}
+
+请为每一道母题出 ${per} 道同类新题，特别注意针对"学生错在哪"来设计，让他真正掌握。
+输出 JSON（source_index 要对应上面对应编号，每道母题 ${per} 条）：
+{"items":[{"source_index":1,"stem":"题目","answer":"答案","solution":"分步讲解","difficulty":"略易|同等|略难","knowledge":"知识点"}]}`;
+}
+
 export function variantGradeSystemPrompt(grade: string): string {
   return `你是小学数学老师，正在批改${grade}学生做"举一反三"练习题的手写答案照片。
 你会拿到若干道题目的题干和标准答案，需要把照片里学生的作答对应到具体题目上，并判断对错。

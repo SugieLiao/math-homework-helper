@@ -39,7 +39,7 @@ export const api = {
   get: (p) => request(p),
   post: (p, body) => request(p, { method: 'POST', body: JSON.stringify(body || {}) }),
   patch: (p, body) => request(p, { method: 'PATCH', body: JSON.stringify(body || {}) }),
-  del: (p) => request(p, { method: 'DELETE' }),
+  del: (p, body) => request(p, { method: 'DELETE', body: JSON.stringify(body || {}) }),
 
   async upload(path, file, extra = {}) {
     const fd = new FormData();
