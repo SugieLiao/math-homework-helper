@@ -111,6 +111,11 @@ textarea { resize: vertical; min-height: 70px; }
 .sub-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; }
 .sub-item:hover { background: #fafbff; }
 .sub-thumb { width: 46px; height: 46px; border-radius: 10px; object-fit: cover; background: #eef1f7; flex: none; }
+/* 还没拍照提交的作业（如刚发出去的组卷）用文档图标占位 */
+.sub-thumb-ph { display: flex; align-items: center; justify-content: center; font-size: 22px; border: 1px dashed var(--line); background: #f7f9ff; }
+/* 删除模式：默认不显示勾选框，点了顶部垃圾桶才出现 */
+.sub-item .sub-check { display: none; }
+.del-mode .sub-item .sub-check { display: block; }
 
 /* ---------------- question card ---------------- */
 .q-card { border-left: 4px solid var(--line); }

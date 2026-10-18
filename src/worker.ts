@@ -669,7 +669,14 @@ async function pruneEmptySubmission(env: Env, submissionId: string): Promise<voi
   const left = await env.DB.prepare('SELECT COUNT(*) AS c FROM questions WHERE submission_id = ?')
     .bind(submissionId)
     .first<any>();
-  if (Number(left?.c || 0) === 0) await deleteSubmission(env, submissionId);
+  if (Number(left?.c || 0) > 0) return;
+  // 组卷条目即使一道题都没有也要留着（它是「未作答」的卷子，不是空壳作业）
+  const row = await env.DB.prepare('SELECT kind FROM submissions WHERE id = ?').bind(submissionId).first<any>();
+  if (row?.kind === 'paper') {
+    await env.DB.prepare("UPDATE submissions SET status = 'pending' WHERE id = ?").bind(submissionId).run();
+    return;
+  }
+  await deleteSubmission(env, submissionId);
 }
 
 /** 删除一份作业：级联删变式题、题目，并清掉 R2 上的图片 */
@@ -700,6 +707,11 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
       .run();
     await env.DB.prepare('DELETE FROM questions WHERE submission_id = ?').bind(id).run();
   }
+  // 这是组卷生成的作业条目：连卷子本身一起删掉，否则作业列表里没了、卷子还留着变成孤儿
+  if (sub.paper_id) {
+    await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ?').bind(sub.paper_id).run();
+    await env.DB.prepare('DELETE FROM papers WHERE id = ?').bind(sub.paper_id).run();
+  }
   await env.DB.prepare('DELETE FROM submissions WHERE id = ?').bind(id).run();
   await Promise.all(keys.map((k) => env.IMAGES.delete(k).catch(() => {})));
 }
@@ -721,7 +733,21 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   const b64 = toBase64(buf);
   const s = await getSettings(env);
 
-  const text = await llm(env, gradeSystemPrompt(s.grade), gradeUserPrompt(s.grade), {
+  // 批的是组卷答卷：把原卷题目和正确答案一并给模型当校对依据，判分更稳
+  let userPrompt = gradeUserPrompt(s.grade);
+  if (sub.paper_id) {
+    const items = await env.DB.prepare('SELECT pos, stem, answer FROM paper_items WHERE paper_id = ? ORDER BY pos ASC')
+      .bind(sub.paper_id)
+      .all<any>();
+    const rows = items.results || [];
+    if (rows.length) {
+      userPrompt +=
+        '\n\n【这份卷子原本的题目和正确答案，供你校对（学生答案仍以图片上手写的为准，图片上没写的就是没作答）】\n' +
+        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n');
+    }
+  }
+
+  const text = await llm(env, gradeSystemPrompt(s.grade), userPrompt, {
     imageBase64: b64,
     imageType: contentTypeOf(sub.image_key),
     temperature: 0.1,
@@ -1267,7 +1293,27 @@ async function handleApi(
     const items = await env.DB.prepare('SELECT * FROM paper_items WHERE paper_id = ? ORDER BY pos ASC, created_at ASC')
       .bind(pid)
       .all<any>();
-    return json({ paper, items: items.results || [] });
+    const sub = paper?.submission_id
+      ? await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(paper.submission_id).first<any>()
+      : await env.DB.prepare('SELECT * FROM submissions WHERE paper_id = ?').bind(pid).first<any>();
+    // 归属链：教材 → 单元 → 课文，页面上要显示归类到哪
+    const tb = paper?.textbook_id
+      ? await env.DB.prepare('SELECT id, name FROM textbooks WHERE id = ?').bind(paper.textbook_id).first<any>()
+      : null;
+    const ls = paper?.lesson_id
+      ? await env.DB.prepare('SELECT id, name, unit_id FROM lessons WHERE id = ?').bind(paper.lesson_id).first<any>()
+      : null;
+    const un = ls?.unit_id
+      ? await env.DB.prepare('SELECT id, name FROM units WHERE id = ?').bind(ls.unit_id).first<any>()
+      : null;
+    return json({
+      paper,
+      items: items.results || [],
+      submission: sub || null,
+      textbook: tb || null,
+      unit: un || null,
+      lesson: ls || null,
+    });
   }
 
   // 删除卷子里的题目
@@ -1309,39 +1355,148 @@ async function handleApi(
     return json({ ok: true });
   }
 
-  // 确认组卷
+  // 确认组卷：卷子本质上也是一份作业，确认时要归到「教材（必选）→ 单元 → 课文（可选）」，
+  // 并立刻生成一条作业记录（status=pending = 未作答），这样它马上出现在作业列表里。
   if (p.startsWith('/papers/') && p.endsWith('/finalize') && method === 'POST') {
     const pid = p.slice('/papers/'.length, -'/finalize'.length);
+    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
+    if (!paper) throw new HttpError(404, '卷子不存在');
     const body = await req.json<any>().catch(() => ({}));
     const title = String(body.title || '').trim();
-    if (title) {
-      await env.DB.prepare('UPDATE papers SET status = ?, title = ?, updated_at = ? WHERE id = ?')
-        .bind('final', title.slice(0, 60), now(), pid)
+
+    if (!paper.textbook_id) {
+      // 第一次确认：教材必选
+      const tbId = String(body.textbook_id || '').trim();
+      if (!tbId) throw new HttpError(400, '先选这本卷子属于哪本教材');
+      const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ?').bind(tbId).first<any>();
+      if (!tb) throw new HttpError(400, '所选教材不存在');
+      let lessonId: string | null = String(body.lesson_id || '').trim() || null;
+      if (lessonId) {
+        const ls = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        if (!ls) throw new HttpError(400, '所选课文不存在');
+      } else {
+        lessonId = null;
+      }
+      // 幂等：已经建过作业条目就复用，别重复插入
+      let subId: string = paper.submission_id || '';
+      if (!subId) {
+        const exist = await env.DB.prepare('SELECT id FROM submissions WHERE paper_id = ?').bind(pid).first<any>();
+        subId = exist?.id || '';
+      }
+      if (!subId) {
+        subId = uuid();
+        await env.DB.prepare(
+          `INSERT INTO submissions (id, kind, lesson_id, textbook_id, paper_id, status, created_at)
+           VALUES (?, 'paper', ?, ?, ?, 'pending', ?)`,
+        )
+          .bind(subId, lessonId, tbId, pid, now())
+          .run();
+      } else {
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, textbook_id = ? WHERE id = ?')
+          .bind(lessonId, tbId, subId)
+          .run();
+      }
+      await env.DB.prepare(
+        'UPDATE papers SET status = ?, title = ?, textbook_id = ?, lesson_id = ?, submission_id = ?, updated_at = ? WHERE id = ?',
+      )
+        .bind('final', title ? title.slice(0, 60) : paper.title, tbId, lessonId, subId, now(), pid)
         .run();
-    } else {
-      await env.DB.prepare('UPDATE papers SET status = ?, updated_at = ? WHERE id = ?').bind('final', now(), pid).run();
+      return json({ ok: true, submission_id: subId });
     }
-    return json({ ok: true });
+
+    // 已经确认过：只允许改标题 / 改归类
+    if (title) {
+      await env.DB.prepare('UPDATE papers SET title = ?, updated_at = ? WHERE id = ?')
+        .bind(title.slice(0, 60), now(), pid)
+        .run();
+    }
+    if ('textbook_id' in body || 'lesson_id' in body) {
+      const tbId = String(body.textbook_id || paper.textbook_id || '').trim();
+      if (!tbId) throw new HttpError(400, '这本卷子还没选教材');
+      let lessonId: string | null = String(body.lesson_id || '').trim() || null;
+      if (lessonId) {
+        const ls = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        if (!ls) throw new HttpError(400, '所选课文不存在');
+      }
+      await env.DB.prepare('UPDATE papers SET textbook_id = ?, lesson_id = ?, updated_at = ? WHERE id = ?')
+        .bind(tbId, lessonId, now(), pid)
+        .run();
+      if (paper.submission_id) {
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, textbook_id = ? WHERE id = ?')
+          .bind(lessonId, tbId, paper.submission_id)
+          .run();
+      }
+    }
+    return json({ ok: true, submission_id: paper.submission_id || '' });
   }
 
   if (p.startsWith('/papers/') && method === 'DELETE') {
     const pid = p.slice('/papers/'.length);
+    const pp = await env.DB.prepare('SELECT submission_id FROM papers WHERE id = ?').bind(pid).first<any>();
+    if (pp?.submission_id) await deleteSubmission(env, String(pp.submission_id));
+    await env.DB.prepare('DELETE FROM submissions WHERE paper_id = ?').bind(pid).run();
     await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ?').bind(pid).run();
     await env.DB.prepare('DELETE FROM papers WHERE id = ?').bind(pid).run();
     return json({ ok: true });
+  }
+
+  // 提交卷子答案：把拍下来的答卷挂到「确认组卷」时生成的那条作业记录上，再走正常批改
+  if (p.startsWith('/papers/') && p.endsWith('/answer') && method === 'POST') {
+    const pid = p.slice('/papers/'.length, -'/answer'.length);
+    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
+    if (!paper) throw new HttpError(404, '卷子不存在');
+    const form = await req.formData();
+    const file = form.get('file') as File | null;
+    if (!file) throw new HttpError(400, '没有收到图片');
+    const ext = extOf(file.name);
+    if (ext === 'heic' || ext === 'heif') {
+      throw new HttpError(
+        400,
+        'HEIC 格式的照片大模型读不了。请在 iPhone「设置 → 相机 → 格式」里改成「兼容性最佳」，或者截图后再上传。',
+      );
+    }
+    if (file.size > 10 * 1024 * 1024) throw new HttpError(400, '图片太大了（超过 10MB），请压缩或截图后再传。');
+
+    let subId: string = paper.submission_id || '';
+    if (!subId) {
+      const exist = await env.DB.prepare('SELECT id FROM submissions WHERE paper_id = ?').bind(pid).first<any>();
+      subId = exist?.id || '';
+    }
+    if (!subId) {
+      // 兜底：万一卷子没走确认流程，这里补一条作业记录
+      subId = uuid();
+      await env.DB.prepare(
+        `INSERT INTO submissions (id, kind, lesson_id, textbook_id, paper_id, status, created_at)
+         VALUES (?, 'paper', ?, ?, ?, 'grading', ?)`,
+      )
+        .bind(subId, paper.lesson_id || null, paper.textbook_id || null, pid, now())
+        .run();
+      await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ?').bind(subId, pid).run();
+    }
+
+    const key = `orig/${subId}.${ext}`;
+    await env.IMAGES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: contentTypeOf(key) } });
+    await env.DB.prepare("UPDATE submissions SET image_key = ?, status = 'grading', error_msg = NULL WHERE id = ?")
+      .bind(key, subId)
+      .run();
+    return json({ id: subId, image_key: key });
   }
 
   if (p === '/submissions' && method === 'GET') {
     const lessonId = (url.searchParams.get('lesson') || '').trim();
     const unitId = (url.searchParams.get('unit') || '').trim();
     const tbId = (url.searchParams.get('textbook') || '').trim();
+    // 组卷确认后生成的 kind='paper' 条目也算作业（未作答时 status='pending'）
     let sql = `SELECT s.*, l.name AS lesson_name, l.unit_id AS unit_id,
-        u.name AS unit_name, u.textbook_id AS textbook_id, t.name AS textbook_name
+        u.name AS unit_name, u.textbook_id AS textbook_id, t.name AS textbook_name,
+        pt.name AS paper_textbook_name, pp.title AS paper_title
        FROM submissions s
        LEFT JOIN lessons l ON l.id = s.lesson_id
        LEFT JOIN units u ON u.id = l.unit_id
        LEFT JOIN textbooks t ON t.id = u.textbook_id
-       WHERE s.kind='homework'`;
+       LEFT JOIN textbooks pt ON pt.id = s.textbook_id
+       LEFT JOIN papers pp ON pp.id = s.paper_id
+       WHERE s.kind IN ('homework','paper')`;
     const binds: any[] = [];
     if (lessonId === '__none') {
       // 只看「没归类」的作业
@@ -1355,9 +1510,9 @@ async function handleApi(
     } else if (tbId) {
       // 关键：未归类的作业 lesson_id 是 NULL，LEFT JOIN 后 u.textbook_id 也是 NULL，
       // 只写 u.textbook_id = ? 会把它们全过滤掉，用户会以为作业丢了。
-      // 按教材筛选时应当同时带上未归类的。
-      sql += ' AND (u.textbook_id = ? OR s.lesson_id IS NULL)';
-      binds.push(tbId);
+      // 按教材筛选时应当同时带上未归类的；组卷条目则可能只归到了教材（lesson_id 为空）。
+      sql += ' AND (u.textbook_id = ? OR (s.lesson_id IS NULL AND (s.textbook_id IS NULL OR s.textbook_id = ?)))';
+      binds.push(tbId, tbId);
     }
     sql += ' ORDER BY s.created_at DESC LIMIT 200';
     const rows = await env.DB.prepare(sql).bind(...binds).all<any>();
@@ -1374,11 +1529,30 @@ async function handleApi(
         const m = computeMastery(q, vs.results || []);
         if (m.passed) passed += 1;
       }
+      // 卷子还没交答案时没有题目，题量按卷子本身的题目数显示
+      let total = list.length;
+      if (!total && s.paper_id) {
+        const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_items WHERE paper_id = ?')
+          .bind(s.paper_id)
+          .first<any>();
+        total = Number(cnt?.c || 0);
+      }
       out.push({
         ...s,
-        total: list.length,
+        total,
         wrong: list.filter((q) => Number(q.is_correct) === 0).length,
         passed,
+        paper_title: s.paper_title || '',
+        // 作答状态按「有没有题目」判定，跟是不是组卷无关：
+        // 组卷刚发出去、或任何一份还没做出来的作业，都是 pending（未作答）。
+        state:
+          s.status === 'error'
+            ? 'error'
+            : s.status === 'grading'
+              ? 'grading'
+              : list.length > 0
+                ? 'answered'
+                : 'pending',
       });
     }
     return json({ submissions: out });

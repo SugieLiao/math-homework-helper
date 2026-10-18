@@ -65,14 +65,16 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
   updated_at  TEXT
 );
 
--- 一次拍照提交（作业 / 举一反三答案）
+-- 一次拍照提交（作业 / 举一反三答案 / 组卷答卷）
 CREATE TABLE IF NOT EXISTS submissions (
   id          TEXT PRIMARY KEY,
-  kind        TEXT NOT NULL,          -- homework | variant
+  kind        TEXT NOT NULL,          -- homework | variant | paper
   parent_id   TEXT,                   -- kind=variant 时的母题 id
   lesson_id   TEXT,                   -- 归属课文（units/lessons），用于按单元复习
-  image_key   TEXT,                   -- R2 原图
-  status      TEXT DEFAULT 'graded',  -- grading | graded | error
+  textbook_id TEXT,                   -- 归属教材（kind=paper 且没选到具体课文时用；教材必选，课文可选）
+  paper_id    TEXT,                   -- kind=paper 时对应的卷子 id
+  image_key   TEXT,                   -- R2 原图（卷子未作答时为 NULL）
+  status      TEXT DEFAULT 'graded',  -- grading | graded | error | pending（卷子已发未作答）
   error_msg   TEXT,
   note        TEXT,
   created_at  TEXT
@@ -125,7 +127,10 @@ CREATE TABLE IF NOT EXISTS papers (
   title       TEXT NOT NULL,          -- 卷子标题，如「错题练习卷 10-18」
   ordered     INTEGER DEFAULT 1,      -- 1 = 按错题顺序组卷；0 = 乱序
   status      TEXT DEFAULT 'draft',   -- draft = 还在编辑；final = 已确认组卷
-  per_question INTEGER DEFAULT 2,     -- 每道错题出几道类似题
+  per_question INTEGER DEFAULT 2,     -- 每道母题出几道类似题
+  textbook_id TEXT,                   -- 确认组卷时选的教材（必选）
+  lesson_id   TEXT,                   -- 确认组卷时选的课文（可选；没选就是只归到教材）
+  submission_id TEXT,                 -- 确认组卷后生成的作业条目 id（卷子本质上也是一份作业）
   created_at  TEXT,
   updated_at  TEXT
 );

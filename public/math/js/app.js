@@ -189,8 +189,12 @@ async function home(opts = {}) {
     <div class="row wrap" style="margin:12px 0">
       <div class="section-title" style="margin:0">作业记录</div>
       <span class="spacer"></span>
-      <button class="btn sm" id="btn-select-all">全选</button>
-      <button class="btn danger sm" id="btn-del-sel">删除所选</button>
+      <button class="btn sm" id="btn-trash">🗑 删除作业</button>
+      <span id="del-ops" class="row wrap hidden">
+        <button class="btn sm" id="btn-select-all">全选</button>
+        <button class="btn danger sm" id="btn-del-sel">删除所选（0）</button>
+        <button class="btn sm" id="btn-del-cancel">取消</button>
+      </span>
     </div>
     <div id="list"></div>`;
 
@@ -233,6 +237,7 @@ async function home(opts = {}) {
 
   const list = document.getElementById('list');
   if (!subs.length) {
+    document.getElementById('btn-trash').classList.add('hidden');
     list.innerHTML = `<div class="card"><div class="empty">${
       lessonFilter === '__none' ? '没有未归类的作业，都归好啦。'
         : lessonFilter ? '这一课还没有作业记录。'
@@ -245,8 +250,14 @@ async function home(opts = {}) {
   const blocks = [];
   const unitMap = new Map();
   subs.forEach((s) => {
-    const uKey = s.unit_id || '__none';
-    if (!unitMap.has(uKey)) unitMap.set(uKey, { name: s.unit_name || '未归类', lessons: new Map() });
+    // 组卷可能只选了教材没选单元课文，那也别混进笼统的「未归类」，单独挂在该教材名下
+    const uKey = s.unit_id || (s.paper_id && s.textbook_id ? `tb:${s.textbook_id}` : '__none');
+    if (!unitMap.has(uKey)) {
+      unitMap.set(uKey, {
+        name: s.unit_name || (s.paper_textbook_name ? `${s.paper_textbook_name}（未指定单元）` : '未归类'),
+        lessons: new Map(),
+      });
+    }
     const u = unitMap.get(uKey);
     const lKey = s.lesson_id || '__none';
     if (!u.lessons.has(lKey)) u.lessons.set(lKey, { name: s.lesson_name || '未归类', items: [] });
@@ -256,20 +267,39 @@ async function home(opts = {}) {
     u.lessons.forEach((l, lKey) => blocks.push({ uKey, uName: u.name, lKey, lName: l.name, items: l.items }));
   });
 
-  const rowHtml = (s, withTag) => `
+  // 组卷也是一份作业：有「组卷」标签，点进去看的是卷子本身。
+  // 作答状态不看是不是组卷，只看有没有题目——没做的都显示「未作答」，批改失败的显示「批改失败」。
+  const stateBadge = (s) => {
+    if (s.state === 'pending') return `<span class="badge info">未作答</span>`;
+    if (s.state === 'grading') return `<span class="badge gray">批改中</span>`;
+    if (s.state === 'error') return `<span class="badge wrong">批改失败</span>`;
+    return `<span class="badge ${s.wrong ? 'wrong' : 'pass'}">${s.wrong ? `错 ${s.wrong} 题` : '全对'}</span>`;
+  };
+  const rowHtml = (s) => {
+    const isPaper = !!s.paper_id;
+    const href = isPaper ? `#/paper/${s.paper_id}` : `#/s/${s.id}`;
+    const thumb = s.image_key
+      ? `<img class="sub-thumb zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" />`
+      : `<div class="sub-thumb sub-thumb-ph">📄</div>`;
+    const title = isPaper ? `📝 ${esc(s.paper_title || '练习卷')}` : fmtDate(s.created_at);
+    const meta = isPaper
+      ? `${fmtDate(s.created_at)} · ${s.total} 题`
+      : s.state === 'pending'
+        ? `${s.total} 题（还没做）`
+        : `${s.total} 题 · 错 ${s.wrong} 题 · 过关 ${s.passed} 题`;
+    return `
     <div class="sub-item" style="border-bottom:1px solid var(--line)">
       <input type="checkbox" class="sub-check" data-id="${s.id}" style="width:20px;height:20px;flex:0 0 auto" />
-      <a href="#/s/${s.id}" style="display:flex;flex:1;min-width:0;text-decoration:none;color:inherit">
-        <img class="sub-thumb zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" />
+      <a href="${href}" style="display:flex;flex:1;min-width:0;text-decoration:none;color:inherit">
+        ${thumb}
         <div style="flex:1;min-width:0">
-          <div style="font-weight:600">${fmtDate(s.created_at)}</div>
-          <div class="small muted">${s.total} 题 · 错 ${s.wrong} 题 · 过关 ${s.passed} 题</div>
-          ${withTag && s.lesson_name ? `<div><span class="tag">${esc(s.lesson_name)}</span></div>` : ''}
+          <div style="font-weight:600">${title}${isPaper ? ' <span class="tag">组卷</span>' : ''}</div>
+          <div class="small muted">${meta}</div>
         </div>
       </a>
-      <span class="badge ${s.wrong ? 'wrong' : 'pass'}">${s.wrong ? '有错题' : '全对'}</span>
-      <button class="btn danger sm" data-del="${s.id}">删除</button>
+      ${stateBadge(s)}
     </div>`;
+  };
 
   let html = '';
   let lastUnit = null;
@@ -282,19 +312,38 @@ async function home(opts = {}) {
     html += `<div class="row wrap" style="padding:8px 10px 4px;background:#f7f9ff;border-bottom:1px solid var(--line)">
         <b>${esc(b.lName)}</b><span class="small muted" style="margin-left:8px">${b.items.length} 份</span>
       </div>`;
-    html += b.items.map((s) => rowHtml(s, false)).join('');
+    html += b.items.map(rowHtml).join('');
   });
   html += `</div>`;
   list.innerHTML = html;
 
-  const selected = () => Array.from(list.querySelectorAll('.sub-check:checked')).map((c) => c.dataset.id);
+  /* 删除：默认不显示勾选框，点顶部垃圾桶才进入删除模式 */
+  const delOps = document.getElementById('del-ops');
+  const trashBtn = document.getElementById('btn-trash');
+  const boxes = () => Array.from(list.querySelectorAll('.sub-check'));
+  const selected = () => boxes().filter((c) => c.checked).map((c) => c.dataset.id);
+  const refreshDel = () => {
+    document.getElementById('btn-del-sel').textContent = `删除所选（${selected().length}）`;
+  };
+  const setDelMode = (on) => {
+    list.classList.toggle('del-mode', on);
+    trashBtn.classList.toggle('hidden', on);
+    delOps.classList.toggle('hidden', !on);
+    if (!on) boxes().forEach((b) => (b.checked = false));
+    refreshDel();
+  };
+  trashBtn.onclick = () => {
+    setDelMode(true);
+    toast('勾选要删除的作业，然后点「删除所选」');
+  };
+  document.getElementById('btn-del-cancel').onclick = () => setDelMode(false);
+  boxes().forEach((b) => (b.onchange = refreshDel));
 
   const doDelete = async (ids) => {
     if (!ids.length) return toast('先勾选要删除的作业');
-    const okDel = await confirmDialog(
-      `里面的题目、举一反三记录和图片会一起删掉，无法恢复。`,
-      { title: `删除这 ${ids.length} 份作业？` },
-    );
+    const okDel = await confirmDialog('里面的题目、举一反三记录和图片会一起删掉，无法恢复。', {
+      title: `删除这 ${ids.length} 份作业？`,
+    });
     if (!okDel) return;
     busy('删除中…');
     try {
@@ -310,13 +359,12 @@ async function home(opts = {}) {
 
   document.getElementById('btn-del-sel').onclick = () => doDelete(selected());
   document.getElementById('btn-select-all').onclick = () => {
-    const boxes = list.querySelectorAll('.sub-check');
-    const allChecked = Array.from(boxes).every((b) => b.checked);
-    boxes.forEach((b) => (b.checked = !allChecked));
+    const bs = boxes();
+    const allChecked = bs.every((b) => b.checked);
+    bs.forEach((b) => (b.checked = !allChecked));
+    refreshDel();
   };
-  list.querySelectorAll('[data-del]').forEach((b) => {
-    b.onclick = () => doDelete([b.dataset.del]);
-  });
+  refreshDel();
 }
 
 /* ------------------------------------------------ 作业详情 */
@@ -347,6 +395,12 @@ async function submission(id) {
           错 ${qs.filter((q) => !Number(q.is_correct)).length} 题</span>
       </div>
       ${s.image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" style="max-height:420px" />` : ''}
+      ${
+        s.paper_id
+          ? `<div class="row wrap" style="margin-top:8px"><span class="tag">组卷</span>
+               <a class="btn sm" href="#/paper/${esc(s.paper_id)}">看这张卷子</a></div>`
+          : ''
+      }
       <div class="row wrap" style="margin-top:12px">
         <label style="min-width:92px">属于</label>
         <select id="s-lesson" style="flex:1;min-width:160px">
@@ -721,6 +775,107 @@ function paperDialog(questionIds, opts = {}) {
   };
 }
 
+/* 归类弹窗：教材必选，单元 / 课文可选。用于「确认组卷」时决定这张卷子挂在作业列表的哪儿。
+   返回 { textbook_id, unit_id, lesson_id }，取消返回 null。 */
+async function classifyDialog(defaults = {}) {
+  const textbooks = (await api.get('/textbooks')).textbooks || [];
+  if (!textbooks.length) {
+    toast('还没有教材，先去「大纲」里建一本');
+    return null;
+  }
+  const tbId0 = defaults.textbook_id && textbooks.some((t) => t.id === defaults.textbook_id)
+    ? defaults.textbook_id
+    : textbooks[0].id;
+  let units = [];
+  try {
+    units = (await api.get(`/textbook?textbook=${encodeURIComponent(tbId0)}`)).units || [];
+  } catch (e) { /* 大纲拉不到也能选教材 */ }
+
+  // 从 lesson_id 反推它属于哪个单元，好在下拉里默认选中
+  let unitId0 = '';
+  if (defaults.lesson_id) {
+    const hit = units.find((u) => (u.lessons || []).some((l) => l.id === defaults.lesson_id));
+    if (hit) unitId0 = hit.id;
+  }
+
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `
+      <div class="modal-card">
+        <h3>这张卷子归到哪儿</h3>
+        <div class="field">
+          <label>教材（必选）</label>
+          <select id="cl-tb">
+            ${textbooks
+              .map((t) => `<option value="${esc(t.id)}" ${t.id === tbId0 ? 'selected' : ''}>${esc(t.name)}</option>`)
+              .join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>单元（可不选）</label>
+          <select id="cl-unit">
+            <option value="">— 不选，只归到教材 —</option>
+            ${units.map((u) => `<option value="${esc(u.id)}" ${u.id === unitId0 ? 'selected' : ''}>${esc(u.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label>课文（可不选）</label>
+          <select id="cl-lesson">
+            <option value="">— 不选 —</option>
+            ${(units.find((u) => u.id === unitId0)?.lessons || [])
+              .map(
+                (l) => `<option value="${esc(l.id)}" ${l.id === defaults.lesson_id ? 'selected' : ''}>${esc(l.name)}</option>`,
+              )
+              .join('')}
+          </select>
+          <div class="hint">选了以后，这张卷子就挂在对应单元/课文下面，作业列表里一筛就出来。</div>
+        </div>
+        <div class="row-end">
+          <button class="btn" id="cl-cancel">取消</button>
+          <button class="btn primary" id="cl-go">确定</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+
+    let curUnits = units;
+    const tbSel = wrap.querySelector('#cl-tb');
+    const unSel = wrap.querySelector('#cl-unit');
+    const lsSel = wrap.querySelector('#cl-lesson');
+    const fillLessons = () => {
+      const u = curUnits.find((x) => x.id === unSel.value);
+      lsSel.innerHTML =
+        `<option value="">— 不选 —</option>` +
+        ((u?.lessons || []).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('') || '');
+    };
+    tbSel.onchange = async () => {
+      try {
+        curUnits = (await api.get(`/textbook?textbook=${encodeURIComponent(tbSel.value)}`)).units || [];
+      } catch (e) {
+        curUnits = [];
+      }
+      unSel.innerHTML =
+        `<option value="">— 不选，只归到教材 —</option>` +
+        curUnits.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');
+      fillLessons();
+    };
+    unSel.onchange = fillLessons;
+
+    const close = (v) => {
+      wrap.remove();
+      resolve(v);
+    };
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) close(null);
+    });
+    wrap.querySelector('#cl-cancel').onclick = () => close(null);
+    wrap.querySelector('#cl-go').onclick = () => {
+      if (!tbSel.value) return toast('先选一本教材');
+      close({ textbook_id: tbSel.value, unit_id: unSel.value || '', lesson_id: lsSel.value || '' });
+    };
+  });
+}
+
 /* ------------------------------------------------ 改判弹窗 */
 export function editDialog(q) {
   const wrap = document.createElement('div');
@@ -803,6 +958,9 @@ async function renderPaper(id) {
   }
   const paper = d.paper;
   let items = d.items || [];
+  const sub = d.submission || null;
+  const answered = !!(sub && sub.status === 'graded');
+  const place = [d.textbook?.name, d.unit?.name, d.lesson?.name].filter(Boolean).join(' › ');
 
   const itemHtml = (it, i) => `
     <div class="paper-item" data-id="${it.id}" draggable="true">
@@ -819,14 +977,28 @@ async function renderPaper(id) {
       <div class="small muted">答案：${esc(it.answer)}</div>
     </div>`;
 
+  const isFinal = paper.status === 'final';
   view.innerHTML = `
     <div class="card noprint">
       <div class="row wrap">
         <h2 style="margin:0">${esc(paper.title)}</h2>
-        <span class="badge ${paper.status === 'final' ? 'pass' : 'gray'}">${paper.status === 'final' ? '已组卷' : '草稿'}</span>
+        <span class="tag">组卷</span>
+        <span class="badge ${isFinal ? 'pass' : 'gray'}">${isFinal ? '已组卷' : '草稿'}</span>
+        ${isFinal && !answered ? `<span class="badge info">未作答</span>` : ''}
         <span class="spacer"></span>
         <span class="small muted">共 <b id="pi-count">${items.length}</b> 题 · 已选 <span id="pi-sel">0</span></span>
       </div>
+      ${
+        isFinal
+          ? `<div class="small muted" style="margin-top:6px">归类：${esc(place || '未归类')}
+             <button class="btn sm" id="pi-reclass" style="margin-left:8px">改归类</button></div>
+             <div class="row wrap" style="margin-top:10px">
+               <button class="btn primary sm" id="pi-shoot">📷 ${answered ? '重新提交答案' : '拍照交答案'}</button>
+               <button class="btn primary sm" id="pi-album">🖼 从相册选</button>
+               ${answered && sub ? `<a class="btn sm" href="#/s/${sub.id}">看批改结果</a>` : ''}
+             </div>`
+          : ''
+      }
       <div class="row wrap" style="margin-top:10px">
         <button class="btn sm" id="pi-all">全选</button>
         <button class="btn sm" id="pi-none">清空</button>
@@ -834,10 +1006,14 @@ async function renderPaper(id) {
         <span class="spacer"></span>
         <button class="btn sm" id="pi-shuffle">🔀 一键乱序</button>
         <button class="btn sm" id="pi-answer">👁 显示/隐藏答案</button>
-        <button class="btn primary" id="pi-final">✔ 确认组卷</button>
+        ${isFinal ? '' : '<button class="btn primary" id="pi-final">✔ 确认组卷</button>'}
         <button class="btn primary" id="pi-print">🖨 打印试卷</button>
       </div>
-      <div class="hint">按住左侧的 ⋮⋮ 可以拖动改题目顺序；勾选题目可删掉不要的；确认组卷后再打印。</div>
+      <div class="hint">${
+        isFinal
+          ? '这张卷子已经进作业记录了。打印出来给孩子做，做完拍照交回来就能自动批改。'
+          : '按住左侧的 ⋮⋮ 可以拖动改题目顺序；勾选题目可删掉不要的；确认组卷后它会变成一份作业。'
+      }</div>
     </div>
     <div id="pi-list">${items.length ? items.map(itemHtml).join('') : '<div class="empty">这张卷子一道题都没有了</div>'}</div>`;
 
@@ -900,17 +1076,50 @@ async function renderPaper(id) {
     }
   };
 
-  document.getElementById('pi-final').onclick = async () => {
+  // 确认组卷：先问清归到哪本教材（必选）/ 哪个单元 / 哪篇课文（可选），
+  // 然后后端生成一条作业记录，这张卷子就以「未作答」出现在作业列表里。
+  const doFinalize = async () => {
+    const picked = await classifyDialog({ textbook_id: paper.textbook_id || '', lesson_id: paper.lesson_id || '' });
+    if (!picked) return;
     try {
       busy('保存中…');
-      await api.post(`/papers/${id}/finalize`, { title: paper.title });
+      await api.post(`/papers/${id}/finalize`, { title: paper.title, ...picked });
       idle();
-      toast('已确认组卷，可以打印了');
+      toast('已确认组卷，它已经进作业记录了，可以打印');
       await renderPaper(id);
     } catch (e) {
       idle();
       toast(e.message);
     }
+  };
+  const finalBtn = document.getElementById('pi-final');
+  if (finalBtn) finalBtn.onclick = doFinalize;
+  const reBtn2 = document.getElementById('pi-reclass');
+  if (reBtn2) {
+    reBtn2.onclick = async () => {
+      const picked = await classifyDialog({ textbook_id: paper.textbook_id || '', lesson_id: paper.lesson_id || '' });
+      if (!picked) return;
+      try {
+        busy('保存中…');
+        await api.post(`/papers/${id}/finalize`, { ...picked });
+        idle();
+        toast('归类已更新');
+        await renderPaper(id);
+      } catch (e) {
+        idle();
+        toast(e.message);
+      }
+    };
+  }
+  const shootBtn = document.getElementById('pi-shoot');
+  const albumBtn = document.getElementById('pi-album');
+  if (shootBtn) shootBtn.onclick = () => {
+    pendingPaperId = id;
+    document.getElementById('file-paper').click();
+  };
+  if (albumBtn) albumBtn.onclick = () => {
+    pendingPaperId = id;
+    document.getElementById('file-paper-album').click();
   };
 
   document.getElementById('pi-print').onclick = () => (location.hash = `#/paper-print/${id}`);
@@ -1042,6 +1251,38 @@ async function handleHomeworkFile(input) {
 }
 
 fileInput.addEventListener('change', () => handleHomeworkFile(fileInput));
+
+/* 组卷的答卷：拍做好的卷子交回来，挂到确认组卷时生成的那条作业记录上再批改 */
+const filePaper = document.getElementById('file-paper');
+const filePaperAlbum = document.getElementById('file-paper-album');
+let pendingPaperId = '';
+
+async function handlePaperFile(input) {
+  const pid = pendingPaperId;
+  const file = input.files && input.files[0];
+  input.value = '';
+  if (!file || !pid) return;
+  let subId = null;
+  try {
+    busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
+    const small = await compressImage(file);
+    const up = await api.upload(`/papers/${pid}/answer`, small, {});
+    subId = up.id;
+    busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
+    await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
+    idle();
+    toast('批改完成');
+    location.hash = `#/s/${up.id}`;
+  } catch (e) {
+    idle();
+    toast(e.message, 8000);
+    if (subId) location.hash = `#/s/${subId}`;
+    else location.hash = `#/paper/${pid}`;
+  }
+}
+
+filePaper.addEventListener('change', () => handlePaperFile(filePaper));
+filePaperAlbum.addEventListener('change', () => handlePaperFile(filePaperAlbum));
 fileAlbum.addEventListener('change', () => handleHomeworkFile(fileAlbum));
 
 /* ------------------------------------------------ 路由 */
