@@ -135,9 +135,19 @@ async function home(opts = {}) {
     const tbs = await api.get('/textbooks');
     textbooks = tbs.textbooks || [];
   } catch (e) { /* 忽略 */ }
-  // 上次选过的教材优先，其次第一本教材
-  const remember = localStorage.getItem(TB_KEY) || '';
-  let tbId = opts.textbook || (textbooks.some((t) => t.id === remember) ? remember : textbooks[0]?.id || '');
+  // 上次选过的教材优先，其次第一本教材。
+  // 注意要区分「没传 textbook」和「传了空串 = 全部教材」，否则选「全部教材」会被打回第一本。
+  const stored = localStorage.getItem(TB_KEY);
+  let tbId;
+  if ('textbook' in opts) {
+    tbId = opts.textbook;
+  } else if (stored === '') {
+    tbId = '';
+  } else if (stored && textbooks.some((t) => t.id === stored)) {
+    tbId = stored;
+  } else {
+    tbId = textbooks[0]?.id || '';
+  }
   const lessonFilter = opts.lesson || '';
   try {
     const t = await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook');
@@ -164,10 +174,12 @@ async function home(opts = {}) {
 
     <div class="filter-bar">
       <select id="tb-pick" title="教材">
+        <option value="" ${tbId ? '' : 'selected'}>全部教材</option>
         ${textbooks.map((t) => `<option value="${esc(t.id)}" ${t.id === tbId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
       </select>
       <select id="filter-lesson" title="课文">
         <option value="">全部课文</option>
+        <option value="__none" ${lessonFilter === '__none' ? 'selected' : ''}>只看未归类</option>
         ${lessonOptionsFor(units)}
       </select>
     </div>
@@ -181,8 +193,10 @@ async function home(opts = {}) {
     </div>
     <div id="list"></div>`;
 
-  document.getElementById('btn-shoot').onclick = () => openUploadModal('shoot', textbooks, tbId, lessonFilter);
-  document.getElementById('btn-album').onclick = () => openUploadModal('album', textbooks, tbId, lessonFilter);
+  // 正在看某一课（或「未归类」）时，弹窗里默认就带到那一课
+  const preferLesson = lessonFilter && lessonFilter !== '__none' ? lessonFilter : '';
+  document.getElementById('btn-shoot').onclick = () => openUploadModal('shoot', textbooks, tbId, preferLesson);
+  document.getElementById('btn-album').onclick = () => openUploadModal('album', textbooks, tbId, preferLesson);
   document.getElementById('btn-wrong').onclick = () => (location.hash = '#/wrong');
   document.getElementById('btn-set').onclick = () => (location.hash = '#/settings');
 
@@ -219,7 +233,9 @@ async function home(opts = {}) {
   const list = document.getElementById('list');
   if (!subs.length) {
     list.innerHTML = `<div class="card"><div class="empty">${
-      lessonFilter ? '这一课还没有作业记录。' : '还没有作业记录。<br/>点上面「拍照交作业」开始吧。'
+      lessonFilter === '__none' ? '没有未归类的作业，都归好啦。'
+        : lessonFilter ? '这一课还没有作业记录。'
+        : '还没有作业记录。<br/>点上面「拍照交作业」开始吧。'
     }</div></div>`;
     return;
   }

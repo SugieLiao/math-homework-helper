@@ -1080,14 +1080,20 @@ async function handleApi(
        LEFT JOIN textbooks t ON t.id = u.textbook_id
        WHERE s.kind='homework'`;
     const binds: any[] = [];
-    if (lessonId) {
+    if (lessonId === '__none') {
+      // 只看「没归类」的作业
+      sql += ' AND s.lesson_id IS NULL';
+    } else if (lessonId) {
       sql += ' AND s.lesson_id = ?';
       binds.push(lessonId);
     } else if (unitId) {
       sql += ' AND l.unit_id = ?';
       binds.push(unitId);
     } else if (tbId) {
-      sql += ' AND u.textbook_id = ?';
+      // 关键：未归类的作业 lesson_id 是 NULL，LEFT JOIN 后 u.textbook_id 也是 NULL，
+      // 只写 u.textbook_id = ? 会把它们全过滤掉，用户会以为作业丢了。
+      // 按教材筛选时应当同时带上未归类的。
+      sql += ' AND (u.textbook_id = ? OR s.lesson_id IS NULL)';
       binds.push(tbId);
     }
     sql += ' ORDER BY s.created_at DESC LIMIT 200';
