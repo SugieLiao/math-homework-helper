@@ -166,7 +166,14 @@ function homeSkeleton() {
     ${listSkeleton('正在加载作业记录…', 4)}`;
 }
 
+/* 每次切页自增。慢接口回来时如果期间又切过页，这一次渲染就该作废——
+   否则旧页面会把新页面顶掉，甚至因为找不到自己的节点（#list/#stats）而报错。
+   典型场景：网速慢，刚进首页就点「组卷」，首页的请求晚到一步把组卷页盖掉。 */
+let routeEpoch = 0;
+const stalePage = (epoch) => epoch !== routeEpoch;
+
 async function home(opts = {}) {
+  const epoch = routeEpoch;
   // 先把加载态放上去：进首页要连拉教材、大纲、作业三个接口，中间不能一片空白
   // （切教材/课文时旧列表还在，就地换成骨架，用户能看出正在重新查）
   const oldList = document.getElementById('list');
@@ -197,6 +204,8 @@ async function home(opts = {}) {
     const t = await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook');
     units = t.units || [];
   } catch (e) { /* 大纲拉不到不影响主流程 */ }
+
+  if (stalePage(epoch)) return;
 
   const lessonOptionsFor = (list) =>
     list
@@ -270,9 +279,12 @@ async function home(opts = {}) {
         : '';
     data = await api.get(`/submissions${qs}`);
   } catch (e) {
-    document.getElementById('list').innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    if (stalePage(epoch)) return;
+    const errList = document.getElementById('list');
+    if (errList) errList.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
+  if (stalePage(epoch)) return;
   const subs = data.submissions || [];
   const total = subs.reduce((a, s) => a + (s.total || 0), 0);
   const wrong = subs.reduce((a, s) => a + (s.wrong || 0), 0);
@@ -417,11 +429,13 @@ async function home(opts = {}) {
 
 /* ------------------------------------------------ 作业详情 */
 async function submission(id) {
+  const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开这份作业…', 3);
   let data;
   try {
     data = await api.get(`/submissions/${id}`);
   } catch (e) {
+    if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
@@ -434,6 +448,7 @@ async function submission(id) {
     units = t.units || [];
   } catch (e) { /* 忽略 */ }
 
+  if (stalePage(epoch)) return;
   view.innerHTML = `
     <div class="card">
       <div class="row wrap">
@@ -831,6 +846,7 @@ async function deletePageFlow(subId, pageId, pageNo, qCount) {
 /* ------------------------------------------------ 错题本 */
 /* 错题本：按「教材 → 单元 → 课文」分组，组标题上带全选框（可整课 / 整单元选中组卷） */
 async function wrongBook() {
+  const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在加载错题本…', 4);
   let data;
   let textbooks = [];
@@ -838,6 +854,7 @@ async function wrongBook() {
   try {
     [data] = await Promise.all([api.get('/questions')]);
   } catch (e) {
+    if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
@@ -923,6 +940,7 @@ async function wrongBook() {
   });
   if (blocks.length) html += `</div>`;
 
+  if (stalePage(epoch)) return;
   view.innerHTML = `
     <h2>错题本</h2>
     <div class="card noprint">
@@ -1042,6 +1060,7 @@ function hideQueueTip() {
 /* 组卷 = 三步：① 待组卷题目里勾母题 ② 选组卷方式/顺序 ③ 选教材单元课文 → 出卷。
    出完的卷子立刻变成一份「未作答」的作业，所以它同时出现在这里和作业列表里。 */
 async function composePage() {
+  const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在加载待组卷题目…', 4);
   let textbooks = [];
   let queue = [];
@@ -1053,6 +1072,7 @@ async function composePage() {
     queue = qRes.items || [];
     papers = pRes.papers || [];
   } catch (e) {
+    if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
@@ -1119,6 +1139,7 @@ async function composePage() {
   const lessonOpts = (u) =>
     `<option value="">— 不选 —</option>` + ((u?.lessons || []).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('') || '');
 
+  if (stalePage(epoch)) return;
   view.innerHTML = `
     <h2 style="margin-top:0">组卷</h2>
     <div class="card noprint">
@@ -1186,7 +1207,7 @@ async function composePage() {
       </div>
       <div class="field">
         <label>课文（可不选）</label>
-        <select id="cm-lesson" ${textbooks.length ? '' : 'disabled'}>${lessonOpts(units[0])}</select>
+        <select id="cm-lesson" ${textbooks.length ? '' : 'disabled'}>${lessonOpts(null)}</select>
         <div class="hint">教材必选；单元 / 课文可以不选。选了以后这张卷子就挂在对应的单元、课文下面，作业列表里一筛就出来。</div>
       </div>
       <div class="field">
@@ -1313,7 +1334,8 @@ async function composePage() {
         units = [];
       }
       unSel.innerHTML = unitOpts(units);
-      lsSel.innerHTML = lessonOpts(units[0]);
+      // 单元没选就只留「不选」：否则会出现「单元：不选 / 课文却列着第一单元的课」这种自相矛盾的界面
+      lsSel.innerHTML = lessonOpts(null);
     };
   }
   if (unSel) {
@@ -1541,11 +1563,13 @@ function bindCards() {
 
 /* ------------------------------------------------ 试卷（错题组卷） */
 async function renderPaper(id) {
+  const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开卷子…', 3);
   let d;
   try {
     d = await api.get(`/papers/${id}`);
   } catch (e) {
+    if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
@@ -1571,6 +1595,7 @@ async function renderPaper(id) {
     </div>`;
 
   const isFinal = paper.status === 'final';
+  if (stalePage(epoch)) return;
   view.innerHTML = `
     <div class="card noprint">
       <div class="row wrap">
@@ -1752,14 +1777,17 @@ async function renderPaper(id) {
 
 /* 打印试卷：每题留答题空白，答案不给（避免孩子直接抄） */
 async function renderPaperPrint(id) {
+  const epoch = routeEpoch;
   view.innerHTML = `<div class="empty">加载中…</div>`;
   let d;
   try {
     d = await api.get(`/papers/${id}`);
   } catch (e) {
+    if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
+  if (stalePage(epoch)) return;
   const paper = d.paper;
   const items = d.items || [];
   if (!items.length) {
@@ -2042,6 +2070,7 @@ function hideRouteBar() {
 
 async function route() {
   const seq = ++routeSeq;
+  routeEpoch += 1; // 让上一页还在飞的请求作废
   showRouteBar();
   hideQueueTip();
   const hash = location.hash.replace(/^#/, '') || '/';
@@ -2070,6 +2099,8 @@ async function route() {
     if (hash.startsWith('/settings')) return await renderSettings();
     view.innerHTML = '<div class="empty">页面不存在</div>';
   } catch (e) {
+    // 控制台留一份完整堆栈：页面上只显示一句话，排查时得有原始错误
+    console.error('[route]', hash, e);
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
   } finally {
     // 只有最后一次路由算数，避免快速切页时前一次把进度条提前关掉
