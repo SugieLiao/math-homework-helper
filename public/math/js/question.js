@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import { esc, nl2br, toast, busy, idle, fmtDate, compressImage } from './util.js';
-import { masteryBadge, editDialog } from './app.js';
+import { masteryBadge, editDialog, showQueueTip } from './app.js';
 
 const view = () => document.getElementById('view');
 
@@ -83,7 +83,7 @@ export async function renderQuestion(id) {
       <div class="small muted">${m.passed ? '已完全过关 🎉' : `再做对 ${Math.max(0, m.need - m.correct_after_last_wrong)} 道同类题就过关`}</div>
       <div class="row wrap noprint" style="margin-top:12px">
         <button class="btn primary" id="btn-gen">✨ 生成类似题</button>
-        <button class="btn" id="btn-print">🖨 打印所选</button>
+        <button class="btn" id="btn-to-queue">＋ 加入组卷</button>
         <button class="btn ok" id="btn-vphoto">📷 拍照交答案</button>
         <button class="btn" id="btn-valbum">🖼 从相册选</button>
       </div>
@@ -141,14 +141,22 @@ function bindVariantActions(q) {
     }
   };
 
-  document.getElementById('btn-print').onclick = () => {
+  // 勾选的变式题加入「待组卷」，出卷 / 打印统一去组卷模块做
+  document.getElementById('btn-to-queue').onclick = async () => {
     const ids = Array.from(document.querySelectorAll('[data-act=sel]'))
       .filter((x) => x.checked)
       .map((x) => x.dataset.id);
-    if (!ids.length) return toast('先勾选要练习的题目');
-    api.post('/variants/select', { parent_id: q.id, ids }).then(() => {
-      location.hash = `#/print/${q.id}`;
-    });
+    if (!ids.length) return toast('先勾选要加入组卷的题目');
+    try {
+      // 先记住勾选状态，下次进来还能看到选了哪几道
+      await api.post('/variants/select', { parent_id: q.id, ids });
+      const r = await api.post('/paper-queue', { variant_ids: ids });
+      if (r.added === 0 && r.skipped) toast(`这 ${r.skipped} 道本来就在待组卷里，共 ${r.total} 道`);
+      else toast(`已加入待组卷 ${r.added} 道${r.skipped ? `（${r.skipped} 道本来就在）` : ''}，共 ${r.total} 道`);
+      showQueueTip(r.total);
+    } catch (e) {
+      toast(e.message);
+    }
   };
 
   const fi = document.getElementById('file-variant');

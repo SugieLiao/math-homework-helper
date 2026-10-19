@@ -134,13 +134,17 @@ CREATE TABLE IF NOT EXISTS variants (
 
 CREATE INDEX IF NOT EXISTS idx_variants_parent ON variants (parent_id);
 
--- 待组卷题目：在「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷
+-- 待组卷题目：在「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷。
+-- 一行要么是母题（question_id），要么是举一反三的变式题（variant_id），二者互斥。
 CREATE TABLE IF NOT EXISTS paper_queue (
   id          TEXT PRIMARY KEY,
-  question_id TEXT NOT NULL UNIQUE,   -- 同一道题只排一次
+  question_id TEXT,                   -- 母题 id
+  variant_id  TEXT,                   -- 变式题 id（来自「题目 → 举一反三」页）
   created_at  TEXT
 );
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_queue_q ON paper_queue (question_id) WHERE question_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_queue_v ON paper_queue (variant_id) WHERE variant_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_paper_queue_created ON paper_queue (created_at);
 
 -- 组卷：从待组卷题目里挑若干道母题，原题直接成卷或每道出 N 道类似题

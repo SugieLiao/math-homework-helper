@@ -666,6 +666,9 @@ async function deleteQuestion(env: Env, id: string): Promise<void> {
   (vs.results || []).forEach((r: any) => {
     if (r.attempt_image_key) keys.push(r.attempt_image_key);
   });
+  await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id IN (SELECT id FROM variants WHERE parent_id = ?)')
+    .bind(id)
+    .run();
   await env.DB.prepare('DELETE FROM variants WHERE parent_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM questions WHERE id = ?').bind(id).run();
   // 题没了，待组卷列表里的那条也得跟着走，否则会留下一条点开后 404 的空记录
@@ -716,6 +719,17 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
     (vs.results || []).forEach((r) => {
       if (r.attempt_image_key) keys.push(r.attempt_image_key);
     });
+    // 待组卷里引用这些题（母题或它们的变式题）的条目一起清掉，否则会留下点开 404 的死记录
+    await env.DB.prepare(
+      `DELETE FROM paper_queue WHERE variant_id IN (
+         SELECT id FROM variants WHERE parent_id IN (${ids.map(() => '?').join(',')})
+       )`,
+    )
+      .bind(...ids)
+      .run();
+    await env.DB.prepare(`DELETE FROM paper_queue WHERE question_id IN (${ids.map(() => '?').join(',')})`)
+      .bind(...ids)
+      .run();
     await env.DB.prepare(
       `DELETE FROM variants WHERE parent_id IN (${ids.map(() => '?').join(',')})`,
     )
@@ -1406,54 +1420,95 @@ async function handleApi(
   // 「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷。
   // 加到队列里只是排队，不会立刻调模型，所以随时可以加、可以反悔。
   if (p === '/paper-queue' && method === 'GET') {
+    // 队列里两种东西：母题（question_id）和举一反三的变式题（variant_id），
+    // 统一成同一组字段给前端，前端靠 kind 区分怎么显示。
     const rows = await env.DB.prepare(
-      `SELECT pq.id AS queue_id, pq.created_at AS queued_at, q.*,
-              s.created_at AS sub_created_at, s.lesson_id AS lesson_id,
-              l.name AS lesson_name, u.id AS unit_id, u.name AS unit_name,
-              t.id AS textbook_id, t.name AS textbook_name
+      `SELECT pq.id AS queue_id, pq.created_at AS queued_at, 'question' AS kind,
+              q.id AS id, q.no AS no, q.stem AS stem, q.correct_answer AS answer,
+              q.knowledge AS knowledge, q.is_correct AS is_correct, q.submission_id AS submission_id,
+              s.created_at AS sub_created_at, l.name AS lesson_name,
+              u.id AS unit_id, u.name AS unit_name, t.id AS textbook_id, t.name AS textbook_name,
+              NULL AS parent_no, NULL AS variant_seq, NULL AS difficulty
          FROM paper_queue pq
          JOIN questions q ON q.id = pq.question_id
          LEFT JOIN submissions s ON s.id = q.submission_id
          LEFT JOIN lessons l ON l.id = s.lesson_id
          LEFT JOIN units u ON u.id = l.unit_id
          LEFT JOIN textbooks t ON t.id = u.textbook_id
-        ORDER BY pq.created_at ASC, pq.id ASC`,
+        WHERE pq.question_id IS NOT NULL
+        UNION ALL
+       SELECT pq.id, pq.created_at, 'variant',
+              v.id, v.seq, v.stem, v.answer,
+              q2.knowledge, q2.is_correct, q2.submission_id,
+              s.created_at, l.name,
+              u.id, u.name, t.id, t.name,
+              q2.no, v.seq, v.difficulty
+         FROM paper_queue pq
+         JOIN variants v ON v.id = pq.variant_id
+         JOIN questions q2 ON q2.id = v.parent_id
+         LEFT JOIN submissions s ON s.id = q2.submission_id
+         LEFT JOIN lessons l ON l.id = s.lesson_id
+         LEFT JOIN units u ON u.id = l.unit_id
+         LEFT JOIN textbooks t ON t.id = u.textbook_id
+        WHERE pq.variant_id IS NOT NULL
+        ORDER BY queued_at ASC, queue_id ASC`,
     ).all<any>();
     return json({ items: rows.results || [] });
   }
 
   if (p === '/paper-queue' && method === 'POST') {
     const body = await req.json<any>().catch(() => ({}));
-    const raw: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
-    const ids = [...new Set(raw.map(String))];
-    if (!ids.length) throw new HttpError(400, '先勾选要加入的题目');
-    if (ids.length > 60) throw new HttpError(400, `一次最多加入 60 道题（这次 ${ids.length} 道），分批来吧。`);
+    const rawQ: string[] = Array.isArray(body.question_ids) ? body.question_ids.map(String) : [];
+    const rawV: string[] = Array.isArray(body.variant_ids) ? body.variant_ids.map(String) : [];
+    const qIds = [...new Set(rawQ)];
+    const vIds = [...new Set(rawV)];
+    if (!qIds.length && !vIds.length) throw new HttpError(400, '先勾选要加入的题目');
+    if (qIds.length + vIds.length > 60) {
+      throw new HttpError(400, `一次最多加入 60 道题（这次 ${qIds.length + vIds.length} 道），分批来吧。`);
+    }
     let added = 0;
-    for (const qid of ids) {
-      const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(String(qid)).first<any>();
+    for (const qid of qIds) {
+      const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(qid).first<any>();
       if (!q) continue;
-      // UNIQUE(question_id)：同一道题反复加也只排一次
-      const r = await env.DB.prepare('INSERT OR IGNORE INTO paper_queue (id, question_id, created_at) VALUES (?,?,?)')
-        .bind(uuid(), String(qid), now())
+      // 部分唯一索引：同一道题反复加也只排一次
+      const r = await env.DB.prepare(
+        'INSERT OR IGNORE INTO paper_queue (id, question_id, variant_id, created_at) VALUES (?,?,NULL,?)',
+      )
+        .bind(uuid(), qid, now())
+        .run();
+      if (Number(r?.meta?.changes || 0) > 0) added += 1;
+    }
+    for (const vid of vIds) {
+      const v = await env.DB.prepare('SELECT id FROM variants WHERE id = ?').bind(vid).first<any>();
+      if (!v) continue;
+      const r = await env.DB.prepare(
+        'INSERT OR IGNORE INTO paper_queue (id, question_id, variant_id, created_at) VALUES (?,NULL,?,?)',
+      )
+        .bind(uuid(), vid, now())
         .run();
       if (Number(r?.meta?.changes || 0) > 0) added += 1;
     }
     const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_queue').first<any>();
-    return json({ ok: true, added, skipped: ids.length - added, total: Number(cnt?.c || 0) });
+    return json({ ok: true, added, skipped: qIds.length + vIds.length - added, total: Number(cnt?.c || 0) });
   }
 
-  // 移出待组卷：按题目 id 删；body.all = true 则清空
+  // 移出待组卷：按母题 / 变式题 id 删；body.all = true 则清空
   if (p === '/paper-queue' && method === 'DELETE') {
     const body = await req.json<any>().catch(() => ({}));
     if (body.all) {
       const r = await env.DB.prepare('DELETE FROM paper_queue').run();
       return json({ ok: true, removed: Number(r?.meta?.changes || 0) });
     }
-    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
-    if (!ids.length) throw new HttpError(400, '没有收到要移出的题目');
+    const qIds: string[] = Array.isArray(body.question_ids) ? body.question_ids.map(String) : [];
+    const vIds: string[] = Array.isArray(body.variant_ids) ? body.variant_ids.map(String) : [];
+    if (!qIds.length && !vIds.length) throw new HttpError(400, '没有收到要移出的题目');
     let removed = 0;
-    for (const qid of ids) {
-      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(String(qid)).run();
+    for (const qid of qIds) {
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(qid).run();
+      removed += Number(r?.meta?.changes || 0);
+    }
+    for (const vid of vIds) {
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(vid).run();
       removed += Number(r?.meta?.changes || 0);
     }
     return json({ ok: true, removed });
@@ -1482,8 +1537,15 @@ async function handleApi(
   //                   可选 include_original 把原题也排在它的类似题前面
   if (p === '/papers' && method === 'POST') {
     const body = await req.json<any>().catch(() => ({}));
-    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
-    if (!ids.length) throw new HttpError(400, '先勾选要组卷的母题');
+    // 新的统一入参：items = [{kind:'question'|'variant', id}]；老参数 question_ids 继续兼容
+    const itemsRaw: any[] = Array.isArray(body.items) ? body.items : [];
+    const legacyQ: string[] = Array.isArray(body.question_ids) ? body.question_ids.map(String) : [];
+    const seedsIn = itemsRaw.length
+      ? itemsRaw
+          .map((it) => ({ kind: it?.kind === 'variant' ? 'variant' : 'question', id: String(it?.id || '') }))
+          .filter((it) => it.id)
+      : legacyQ.map((id) => ({ kind: 'question' as const, id }));
+    if (!seedsIn.length) throw new HttpError(400, '先勾选要组卷的题目');
     const mode: 'original' | 'variant' = body.mode === 'original' ? 'original' : 'variant';
     const per = Math.min(Math.max(Number(body.per) || 1, 1), 5);
     const withOriginal =
@@ -1491,17 +1553,53 @@ async function handleApi(
     const ordered = body.ordered === false || body.ordered === 0 ? 0 : 1;
     const s = await getSettings(env);
 
+    // 母题 / 变式题先统一成「出题种子」：后面不管是拼原题还是举一反三，都只认这组字段
     const qs: any[] = [];
     const seen = new Set<string>();
-    for (const id of ids) {
-      const qid = String(id);
-      if (seen.has(qid)) continue; // 同一道题被重复勾上时只算一次
-      seen.add(qid);
-      const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(qid).first<any>();
-      if (q) qs.push(q);
+    for (const it of seedsIn) {
+      const key = `${it.kind}:${it.id}`;
+      if (seen.has(key)) continue; // 同一道题被重复勾上时只算一次
+      seen.add(key);
+      if (it.kind === 'variant') {
+        const v = await env.DB.prepare(
+          `SELECT v.*, q.no AS parent_no, q.knowledge AS parent_knowledge
+             FROM variants v JOIN questions q ON q.id = v.parent_id
+            WHERE v.id = ?`,
+        )
+          .bind(it.id)
+          .first<any>();
+        if (!v) continue;
+        qs.push({
+          kind: 'variant',
+          id: v.id,
+          srcId: v.parent_id,
+          no: `变式 ${v.seq ?? ''}`.trim(),
+          srcNo: `${v.parent_no ?? ''} 变式${v.seq ?? ''}`.trim(),
+          stem: String(v.stem || ''),
+          correct_answer: String(v.answer ?? ''),
+          solution: String(v.solution ?? ''),
+          knowledge: String(v.parent_knowledge || ''),
+          error_reason: '',
+        });
+      } else {
+        const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(it.id).first<any>();
+        if (!q) continue;
+        qs.push({
+          kind: 'question',
+          id: q.id,
+          srcId: q.id,
+          no: String(q.no ?? ''),
+          srcNo: String(q.no ?? ''),
+          stem: String(q.stem || ''),
+          correct_answer: String(q.correct_answer ?? ''),
+          solution: String(q.solution ?? ''),
+          knowledge: String(q.knowledge || ''),
+          error_reason: String(q.error_reason || ''),
+        });
+      }
     }
     if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新一下再试');
-    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道母题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
+    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
 
     // 归属：教材必选，单元 / 课文可选（没选课文时单元也要落到 papers 上，否则会被归到「未指定单元」）
     const tbId = String(body.textbook_id || '').trim();
@@ -1525,8 +1623,8 @@ async function handleApi(
       // 只用原题：题干 → 答案直接用批改时的正确答案，不用等模型
       qs.forEach((q, i) => {
         rows.push({
-          srcId: q.id,
-          srcNo: String(q.no ?? i + 1),
+          srcId: q.srcId,
+          srcNo: q.srcNo || String(q.no || i + 1),
           stem: String(q.stem || ''),
           answer: String(q.correct_answer ?? ''),
           solution: String(q.solution ?? ''),
@@ -1584,11 +1682,11 @@ async function handleApi(
 
       for (let i = 1; i <= qs.length; i++) {
         const src = qs[i - 1];
-        const srcNo = String(src.no ?? i);
+        const srcNo = src.srcNo || String(src.no || i);
         // 带上原题：原题排在它自己的类似题前面，孩子先过一遍原题再练变式
         if (withOriginal) {
           rows.push({
-            srcId: src.id,
+            srcId: src.srcId,
             srcNo,
             stem: String(src.stem || ''),
             answer: String(src.correct_answer ?? ''),
@@ -1599,7 +1697,7 @@ async function handleApi(
         }
         for (const it of buckets.get(i) || []) {
           rows.push({
-            srcId: src.id,
+            srcId: src.srcId,
             srcNo,
             stem: String(it.stem || ''),
             answer: String(it.answer ?? ''),
@@ -1648,11 +1746,14 @@ async function handleApi(
         .run();
     }
 
-    // 组完就把用掉的母题从「待组卷」里移走（默认移除，body.keep_queue=true 可保留）
+    // 组完就把用掉的题从「待组卷」里移走（默认移除，body.keep_queue=true 可保留）
     let removedFromQueue = 0;
     if (!body.keep_queue) {
       for (const q of qs) {
-        const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(q.id).run();
+        const r =
+          q.kind === 'variant'
+            ? await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(q.id).run()
+            : await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(q.id).run();
         removedFromQueue += Number(r?.meta?.changes || 0);
       }
     }
@@ -2256,6 +2357,7 @@ async function handleApi(
   }
 
   if (vMatch && method === 'DELETE') {
+    await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(vMatch[1]).run();
     await env.DB.prepare('DELETE FROM variants WHERE id = ?').bind(vMatch[1]).run();
     return json({ ok: true });
   }

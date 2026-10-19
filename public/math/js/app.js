@@ -1050,7 +1050,7 @@ async function addToQueue(questionIds) {
 }
 
 /* 加完题后在底部浮一条，给个直达「组卷」的入口，不用自己去找 */
-function showQueueTip(total) {
+export function showQueueTip(total) {
   let el = document.getElementById('queue-tip');
   if (!el) {
     el = document.createElement('div');
@@ -1108,24 +1108,33 @@ async function composePage() {
   const srcOf = (q) => {
     const when = q.sub_created_at ? `${fmtDate(q.sub_created_at)} 的作业` : '来源不明';
     const where = q.lesson_name || q.unit_name || '未归类';
-    return `${when} · ${where}`;
+    // 变式题要标清它是哪道母题举一反三出来的，否则待组卷里看不出出处
+    return q.kind === 'variant' ? `母题 ${q.parent_no ?? ''} 的举一反三 · ${when} · ${where}` : `${when} · ${where}`;
   };
 
-  const itemHtml = (q) => `
-    <div class="wrong-item" data-row="${esc(q.id)}">
-      <input type="checkbox" class="qcheck" data-id="${esc(q.id)}" style="width:20px;height:20px;flex:0 0 auto;margin-top:2px" />
+  const itemHtml = (q) => {
+    const isVariant = q.kind === 'variant';
+    return `
+    <div class="wrong-item" data-row="${esc(q.id)}" data-kind="${esc(q.kind || 'question')}">
+      <input type="checkbox" class="qcheck" data-id="${esc(q.id)}" data-kind="${esc(q.kind || 'question')}"
+             style="width:20px;height:20px;flex:0 0 auto;margin-top:2px" />
       <div style="flex:1;min-width:0">
         <div class="row wrap">
-          <span class="q-no">${esc(q.no || '')}.</span>
-          <span class="badge ${Number(q.is_correct) === 1 ? 'pass' : 'wrong'}">${
-            Number(q.is_correct) === 1 ? '做对了' : '做错了'
-          }</span>
+          <span class="q-no">${isVariant ? `变式 ${esc(q.no || '')}` : `${esc(q.no || '')}.`}</span>
+          ${
+            isVariant
+              ? '<span class="badge info">举一反三</span>'
+              : `<span class="badge ${Number(q.is_correct) === 1 ? 'pass' : 'wrong'}">${
+                  Number(q.is_correct) === 1 ? '做对了' : '做错了'
+                }</span>`
+          }
           ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
         </div>
         <div class="stem" style="margin:4px 0">${nl2br(q.stem)}</div>
         <div class="small muted">来源：${esc(srcOf(q))}</div>
       </div>
     </div>`;
+  };
 
   const paperRow = (p) => {
     const place = [p.textbook_name, p.unit_name, p.lesson_name].filter(Boolean).join(' › ');
@@ -1215,7 +1224,12 @@ async function composePage() {
 
   /* ---- 勾选与计数 ---- */
   const boxes = () => Array.from(view.querySelectorAll('.qcheck'));
-  const checkedIds = () => boxes().filter((b) => b.checked).map((b) => b.dataset.id);
+  // 待组卷里既有母题也有变式题，勾选结果要带上类型，后面组卷 / 移除都得按类型分开传
+  const checkedRefs = () =>
+    boxes()
+      .filter((b) => b.checked)
+      .map((b) => ({ kind: b.dataset.kind || 'question', id: b.dataset.id }));
+  const checkedIds = () => checkedRefs().map((r) => r.id);
   const refresh = () => {
     const n = checkedIds().length;
     const selEl = document.getElementById('q-sel');
@@ -1228,7 +1242,7 @@ async function composePage() {
     const openBtn = document.getElementById('cm-open');
     if (openBtn) {
       openBtn.disabled = !n || !textbooks.length;
-      openBtn.textContent = n ? `📝 组卷（${n} 道母题）` : '📝 组卷';
+      openBtn.textContent = n ? `📝 组卷（${n} 道题）` : '📝 组卷';
     }
   };
   boxes().forEach((b) => (b.onchange = refresh));
@@ -1271,21 +1285,24 @@ async function composePage() {
   };
   // 批量移出：勾哪几道就移哪几道（题目本身不删，随时能再加回来）
   document.getElementById('btn-q-remove').onclick = async () => {
-    const ids = checkedIds();
-    if (!ids.length) return toast('先勾选要移出的题目');
-    const ok = await confirmDialog(`这 ${ids.length} 道题会从待组卷里移出，题目本身不会删，之后还能再「加入组卷」。`, {
-      title: `移出这 ${ids.length} 道题？`,
+    const refs = checkedRefs();
+    if (!refs.length) return toast('先勾选要移出的题目');
+    const ok = await confirmDialog(`这 ${refs.length} 道题会从待组卷里移出，题目本身不会删，之后还能再「加入组卷」。`, {
+      title: `移出这 ${refs.length} 道题？`,
       okText: '移出',
     });
     if (!ok) return;
     try {
       busy('移出中…');
-      await api.del('/paper-queue', { question_ids: ids });
+      await api.del('/paper-queue', {
+        question_ids: refs.filter((r) => r.kind !== 'variant').map((r) => r.id),
+        variant_ids: refs.filter((r) => r.kind === 'variant').map((r) => r.id),
+      });
       idle();
-      toast(`已移出 ${ids.length} 道`);
+      toast(`已移出 ${refs.length} 道`);
       // 就地删行，不整页重渲染：否则刚勾的其它题也被清掉，看起来像「白选了」
-      ids.forEach((id) => {
-        view.querySelector(`[data-row="${id}"]`)?.remove();
+      refs.forEach((r) => {
+        view.querySelector(`[data-row="${r.id}"]`)?.remove();
       });
       const left = view.querySelectorAll('[data-row]').length;
       if (!left) return await composePage();
@@ -1355,9 +1372,9 @@ async function composePage() {
   const openBtn = document.getElementById('cm-open');
   if (openBtn) {
     openBtn.onclick = () => {
-      const ids = checkedIds();
-      if (!ids.length) return toast('先勾选要做卷的母题');
-      composeDialog({ ids, textbooks, md });
+      const refs = checkedRefs();
+      if (!refs.length) return toast('先勾选要做卷的题目');
+      composeDialog({ refs, textbooks, md });
     };
   }
   refresh();
@@ -1366,10 +1383,11 @@ async function composePage() {
 /* 组卷设置弹窗：点「组卷」后弹出来，选方式 / 每道几道 / 顺序 / 教材单元课文 / 标题，
    确认后直接出卷并跳到卷子页。出卷过程就在弹窗里显示进度，不关弹窗也不让重复点。 */
 async function composeDialog(opts) {
-  const ids = (opts.ids || []).slice();
+  // refs = [{kind:'question'|'variant', id}]：待组卷里现在两种题都能出卷
+  const ids = (opts.refs || []).slice();
   const textbooks = opts.textbooks || [];
   const md = opts.md || '';
-  if (!ids.length) return toast('先勾选要做卷的母题');
+  if (!ids.length) return toast('先勾选要做卷的题目');
   if (!textbooks.length) {
     toast('还没有教材，先去「大纲」里建一本');
     return;
@@ -1515,7 +1533,7 @@ async function composeDialog(opts) {
       return toast(`这次会出 ${total} 道题，一张卷最多 60 道。少选几道母题，或把每道出的数量调小一点。`, 7000);
     }
     const body = {
-      question_ids: ids,
+      items: ids,
       mode: m,
       per: m === 'variant' ? per() : 1,
       include_original: m === 'variant' ? withOrig() : false,
