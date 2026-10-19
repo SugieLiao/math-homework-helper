@@ -122,7 +122,8 @@ document.getElementById('up-tb').onchange = async (e) => {
 };
 document.getElementById('up-go').onclick = () => {
   pendingLessonId = document.getElementById('up-lesson').value || '';
-  cameraShots = []; // 每次新交作业都从第一页开始
+  trayFiles = []; // 每次新交作业都从第一页开始
+  closeShotsTray();
   const kind = pendingKind;
   closeUploadModal();
   // 必须在用户手势里同步触发，否则 iOS 会拦住 file input
@@ -613,7 +614,7 @@ const filePageAdd = document.getElementById('file-page-add');
 
 /** 只批改一页，并把每题的作答区域从这一页的图上裁出来 */
 async function gradeOnePage(subId, pageId, blob, label) {
-  busy(`${label}老师正在批改…（约 15～40 秒，别关页面）`);
+  busy(`${label} 老师正在批改…（约 15～40 秒，别关页面）`);
   const graded = await withTimeout(api.post(`/submissions/${subId}/pages/${pageId}/grade`, {}), 180000);
   const list = graded.questions || [];
   for (const q of list) {
@@ -680,7 +681,8 @@ filePageReplace.addEventListener('change', async () => {
   }
 });
 
-/** 加页：每加一张就单独批这一页（不整份重批，别的页的题和改判都不动） */
+/** 加页：分两步——先把选中的几张全部传上去（快），再逐页批改。
+    这样选 3 张不用「传一张→等批改→再传下一张」，用户只等一次。 */
 filePageAdd.addEventListener('change', async () => {
   const files = Array.from(filePageAdd.files || []);
   filePageAdd.value = '';
@@ -688,32 +690,54 @@ filePageAdd.addEventListener('change', async () => {
   pendingAddSubId = null;
   if (!files.length || !subId) return;
 
-  let total = 0;
-  let okCount = 0;
+  const uploaded = []; // { pageId, pos, blob }
   const failed = [];
+
+  // 阶段一：全部上传（每张 1～2 秒）
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     try {
-      busy(isHeicFile(f) ? 'HEIC 照片正在转成 JPG…' : `第 ${i + 1}/${files.length} 张 · 上传中…`);
+      busy(
+        files.length > 1
+          ? `正在上传第 ${i + 1}/${files.length} 张…`
+          : isHeicFile(f)
+            ? 'HEIC 照片正在转成 JPG…'
+            : '上传中…',
+      );
       const small = await compressImage(f);
       const up = await api.upload(`/submissions/${subId}/pages`, small, {});
-      const list = await gradeOnePage(subId, up.page.id, small, `第 ${up.page.pos + 1} 页`);
-      total += list.length;
-      okCount += 1;
+      uploaded.push({ pageId: up.page.id, pos: up.page.pos, blob: small });
     } catch (e) {
       // 一张失败不要拖累其它几张（多选时经常混着一张特殊格式的）
       failed.push(`第 ${i + 1} 张：${e.message}`);
     }
   }
+
+  // 阶段二：逐页批改（每页一次模型调用）
+  let total = 0;
+  let okPages = 0;
+  for (let i = 0; i < uploaded.length; i++) {
+    const u = uploaded[i];
+    try {
+      const label =
+        uploaded.length > 1 ? `第 ${u.pos + 1} 页（${i + 1}/${uploaded.length}）` : `第 ${u.pos + 1} 页`;
+      const list = await gradeOnePage(subId, u.pageId, u.blob, label);
+      total += list.length;
+      okPages += 1;
+    } catch (e) {
+      failed.push(`第 ${u.pos + 1} 页批改失败：${e.message}`);
+    }
+  }
+
   idle();
-  if (okCount) await submission(subId);
+  if (uploaded.length) await submission(subId);
   if (failed.length) {
     toast(
-      `加上 ${okCount} 页${total ? `（${total} 题）` : ''}，${failed.length} 张没成功。${failed[0]}`,
+      `上传 ${uploaded.length} 页、批改 ${okPages} 页${total ? `（${total} 题）` : ''}，有 ${failed.length} 项没成功。${failed[0]}`,
       10000,
     );
   } else {
-    toast(`已加上 ${files.length} 页，共识别出 ${total} 题`);
+    toast(`已加上 ${uploaded.length} 页，共识别出 ${total} 题`);
   }
 });
 
@@ -1487,56 +1511,125 @@ async function uploadHomeworkFiles(files) {
   }
 }
 
-/* 拍照：一次只能拍一张，所以逐张问「还有下一页吗」。点「再拍一页」是在用户手势里
-   同步调起相机的，不会像 await 之后调 click() 那样被 iOS 拦掉。 */
-let cameraShots = [];
+/* ------------------------------------------------ 待上传照片托盘 */
+// 手机系统一次往往只肯给一张（拍照必然如此，部分机型/内置浏览器的相册也只让单选）。
+// 所以先把照片攒进这个托盘：可以反复「再拍一张 / 再选几张」，攒够了再一次性上传、一次批改。
+let trayFiles = [];
+let trayKind = 'album'; // 'shoot' | 'album'
+let trayUrls = [];
+const MAX_PAGES = 8;
 
-function askMorePage(count) {
-  return new Promise((resolve) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'modal';
-    wrap.innerHTML = `
-      <div class="modal-card">
-        <h3>已经拍了 ${count} 张</h3>
-        <p class="small muted" style="margin-top:-6px">这份作业还有下一页吗？多张会合并成同一份作业一起批改。</p>
-        <div class="row-end">
-          <button class="btn" id="mp-more">📷 再拍一页</button>
-          <button class="btn primary" id="mp-done">✔ 就这些，开始批改</button>
-        </div>
-      </div>`;
-    document.body.appendChild(wrap);
-    const close = (v) => {
-      wrap.remove();
-      resolve(v);
-    };
-    wrap.querySelector('#mp-more').onclick = () => {
-      close(true);
-      fileInput.click(); // 仍在这次点击的用户手势里
-    };
-    wrap.querySelector('#mp-done').onclick = () => close(false);
-    wrap.addEventListener('click', (e) => {
-      if (e.target === wrap) close(false);
-    });
-  });
+function revokeTrayUrls() {
+  for (const u of trayUrls) {
+    try {
+      URL.revokeObjectURL(u);
+    } catch (e) {
+      /* 忽略 */
+    }
+  }
+  trayUrls = [];
 }
 
-fileInput.addEventListener('change', async () => {
-  const f = fileInput.files && fileInput.files[0];
-  fileInput.value = '';
-  if (!f) return;
-  cameraShots.push(f);
-  const more = await askMorePage(cameraShots.length);
-  if (more) return; // 等用户拍下一张
-  const shots = cameraShots;
-  cameraShots = [];
-  await uploadHomeworkFiles(shots);
+function closeShotsTray() {
+  const w = document.getElementById('shot-tray');
+  if (w) w.remove();
+  revokeTrayUrls();
+}
+
+function renderShotsTray() {
+  if (!trayFiles.length) return closeShotsTray();
+  let wrap = document.getElementById('shot-tray');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'shot-tray';
+    wrap.className = 'modal';
+    document.body.appendChild(wrap);
+  }
+  revokeTrayUrls();
+  const cells = trayFiles
+    .map((f, i) => {
+      const url = URL.createObjectURL(f);
+      trayUrls.push(url);
+      return `<div class="tray-item">
+        <img class="tray-img" src="${url}" alt="第 ${i + 1} 页" />
+        <span class="tray-no">${i + 1}</span>
+        <button class="tray-del" data-del="${i}" title="删掉这一张">×</button>
+      </div>`;
+    })
+    .join('');
+  const canAdd = trayFiles.length < MAX_PAGES;
+  const verb = trayKind === 'shoot' ? '拍' : '选';
+  wrap.innerHTML = `
+    <div class="modal-card tray-card">
+      <h3>已经凑了 ${trayFiles.length} 页</h3>
+      <p class="small muted tray-sub">还能继续${verb}，攒够了一次性上传、一次批改。</p>
+      <div class="tray-grid">
+        ${cells}
+        ${canAdd ? `<button class="tray-add" id="tray-add"><span>＋</span><em>再${verb}一张</em></button>` : ''}
+      </div>
+      <div class="hint">${canAdd ? '每张照片算这份作业的一页，选错的点 × 删掉。' : `一次最多 ${MAX_PAGES} 页，多的分两次交。`}</div>
+      <div class="row-end" style="margin-top:14px">
+        <button class="btn" id="tray-cancel">取消</button>
+        <button class="btn primary" id="tray-go">开始批改（${trayFiles.length} 页）</button>
+      </div>
+    </div>`;
+}
+
+function addToTray(files, kind) {
+  if (kind) trayKind = kind;
+  const room = MAX_PAGES - trayFiles.length;
+  if (room <= 0) {
+    toast(`一次最多 ${MAX_PAGES} 页，这批先上传吧`, 6000);
+    return;
+  }
+  trayFiles.push(...files.slice(0, room));
+  if (files.length > room) toast(`一次最多 ${MAX_PAGES} 页，多出的 ${files.length - room} 张没加进来`, 6000);
+  renderShotsTray();
+}
+
+// 托盘里的按钮都用事件委托，重渲染后不用重新绑
+document.addEventListener('click', (e) => {
+  const t = e.target;
+  if (!t || !t.closest || !t.closest('#shot-tray')) return;
+
+  const del = t.closest('.tray-del');
+  if (del) {
+    trayFiles.splice(Number(del.dataset.del), 1);
+    renderShotsTray();
+    return;
+  }
+  if (t.classList && t.classList.contains('tray-img')) {
+    openImage(t.getAttribute('src'), t.getAttribute('alt'));
+    return;
+  }
+  if (t.closest('#tray-add')) {
+    // 必须在这次点击的用户手势里同步调起，iOS 才肯弹相机/相册
+    document.getElementById(trayKind === 'shoot' ? 'file-homework' : 'file-homework-album').click();
+    return;
+  }
+  if (t.closest('#tray-cancel')) {
+    trayFiles = [];
+    closeShotsTray();
+    return;
+  }
+  if (t.closest('#tray-go')) {
+    const shots = trayFiles.slice();
+    trayFiles = [];
+    closeShotsTray();
+    uploadHomeworkFiles(shots);
+  }
 });
 
-fileAlbum.addEventListener('change', async () => {
+fileInput.addEventListener('change', () => {
+  const files = Array.from(fileInput.files || []);
+  fileInput.value = '';
+  if (files.length) addToTray(files, 'shoot');
+});
+
+fileAlbum.addEventListener('change', () => {
   const files = Array.from(fileAlbum.files || []);
   fileAlbum.value = '';
-  if (!files.length) return;
-  await uploadHomeworkFiles(files);
+  if (files.length) addToTray(files, 'album');
 });
 
 /* 组卷的答卷：拍做好的卷子交回来，挂到确认组卷时生成的那条作业记录上再批改 */
