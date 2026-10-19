@@ -1419,6 +1419,25 @@ async function handleApi(
     return json({ ok: true, deleted: ids.length });
   }
 
+  // 批量改判：作业详情页里勾一批题，整体判对 / 判错。
+  // 只动 is_correct —— 家长手动翻判时不需要补错因和正确答案，
+  // 而且刻意保留原有的 error_reason / solution，将来再翻回去还能看到 AI 原来写的分析。
+  if (p === '/questions/batch-verify' && method === 'POST') {
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
+    if (!ids.length) throw new HttpError(400, '先勾选要改判的题目');
+    if (body.is_correct !== true && body.is_correct !== false && body.is_correct !== 0 && body.is_correct !== 1) {
+      throw new HttpError(400, 'is_correct 只能是 true / false');
+    }
+    const val = body.is_correct ? 1 : 0;
+    let n = 0;
+    for (const qid of ids) {
+      const r = await env.DB.prepare('UPDATE questions SET is_correct = ? WHERE id = ?').bind(val, qid).run();
+      n += Number(r.meta?.changes || 0) > 0 ? 1 : 0;
+    }
+    return json({ ok: true, updated: n });
+  }
+
   /* -------------------------------------------------- 待组卷题目（纸篓） */
   // 「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷。
   // 加到队列里只是排队，不会立刻调模型，所以随时可以加、可以反悔。

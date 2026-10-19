@@ -51,7 +51,7 @@ function qCard(q, withCheck = false) {
     </div>
     <div class="stem">${nl2br(q.stem)}</div>
     <div class="answer-line">作答：<b>${esc(q.student_answer || '（空白）')}</b>${ok ? '' : ` &nbsp;·&nbsp; 正确答案：<b>${esc(q.correct_answer)}</b>`}</div>
-    ${q.answer_image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
+    ${!ok && q.answer_image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
     ${!ok && q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
     ${!ok && q.solution ? `<div class="solbox"><div class="t">正确做法</div><pre class="sol">${esc(q.solution)}</pre></div>` : ''}
     ${masteryLine(q.mastery)}
@@ -577,14 +577,20 @@ async function submission(id) {
       qs.length
         ? `<div class="card noprint" id="sp-bar">
       <div class="row wrap">
-        <b>待组卷：已选 <span id="sp-sel">0</span> 题</b>
+        <b>已选 <span id="sp-sel">0</span> 题</b>
         <span class="spacer"></span>
         <button class="btn sm" id="btn-sp-wrong">只选错题</button>
+        <button class="btn sm" id="btn-sp-right">只选对题</button>
         <button class="btn sm" id="btn-sp-all">全选</button>
         <button class="btn sm" id="btn-sp-none">清空</button>
+      </div>
+      <div class="row wrap" style="margin-top:8px">
+        <button class="btn sm" id="btn-sp-pass">✔ 批量判对</button>
+        <button class="btn sm" id="btn-sp-fail">✘ 批量判错</button>
+        <span class="spacer"></span>
         <button class="btn primary" id="btn-sp-paper">＋ 加入组卷</button>
       </div>
-      <div class="hint">勾选要练的题目（进来时已经帮你把做错的都选上了），点「加入组卷」放进待组卷；攒够了去顶部「组卷」页统一出卷。</div>
+      <div class="hint">勾选题目后可以：整体判对 / 判错（只改对错，不用补错因和正确答案），或放进待组卷去出卷。进来时已经帮你把做错的都选上了。</div>
     </div>`
         : ''
     }
@@ -683,9 +689,10 @@ async function submission(id) {
       const el = document.getElementById('sp-sel');
       if (el) el.textContent = String(pboxes().filter((b) => b.checked).length);
     };
-    const setSel = (on, onlyWrong) => {
+    const setSel = (on, mode) => {
+      // mode: 'all' | 'wrong' | 'right'（默认按「是否做错」挑，方便一键批量改判）
       pboxes().forEach((b) => {
-        b.checked = on && (!onlyWrong || b.dataset.wrong === '1');
+        b.checked = on && (mode === 'all' || (mode === 'wrong' ? b.dataset.wrong === '1' : b.dataset.wrong !== '1'));
       });
       refreshSel();
     };
@@ -694,9 +701,10 @@ async function submission(id) {
       b.checked = b.dataset.wrong === '1'; // 默认选上做错的
     });
     refreshSel();
-    document.getElementById('btn-sp-wrong').onclick = () => setSel(true, true);
-    document.getElementById('btn-sp-all').onclick = () => setSel(true, false);
-    document.getElementById('btn-sp-none').onclick = () => setSel(false, false);
+    document.getElementById('btn-sp-wrong').onclick = () => setSel(true, 'wrong');
+    document.getElementById('btn-sp-right').onclick = () => setSel(true, 'right');
+    document.getElementById('btn-sp-all').onclick = () => setSel(true, 'all');
+    document.getElementById('btn-sp-none').onclick = () => setSel(false, 'all');
     document.getElementById('btn-sp-paper').onclick = () => {
       const ids = pboxes()
         .filter((b) => b.checked)
@@ -704,6 +712,32 @@ async function submission(id) {
       if (!ids.length) return toast('先勾选要加入的题目');
       addToQueue(ids);
     };
+
+    /** 批量改判：只翻对错，不碰题干 / 错因 / 正确答案 */
+    const batchVerify = async (to) => {
+      const boxes = pboxes().filter((b) => b.checked);
+      if (!boxes.length) return toast('先勾选要改判的题目');
+      const want = to ? 1 : 0;
+      const ids = boxes.filter((b) => (b.dataset.wrong === '1' ? 0 : 1) !== want).map((b) => b.dataset.id);
+      if (!ids.length) return toast(to ? '选中的题本来就都是对的' : '选中的题本来就都是错的');
+      const yes = await confirmDialog(
+        `把 ${ids.length} 道题改判为「${to ? '正确' : '错误'}」。\n只改对错，题干、错因、正确答案都不动。`,
+        { title: to ? '批量判对' : '批量判错', okText: to ? '判为正确' : '判为错误' },
+      );
+      if (!yes) return;
+      busy('改判中…');
+      try {
+        const r = await api.post('/questions/batch-verify', { ids, is_correct: !!to });
+        idle();
+        toast(`已改判 ${r.updated} 道`);
+        await submission(id);
+      } catch (e) {
+        idle();
+        toast(e.message, 6000);
+      }
+    };
+    document.getElementById('btn-sp-pass').onclick = () => batchVerify(true);
+    document.getElementById('btn-sp-fail').onclick = () => batchVerify(false);
   }
 
   /* 图片编辑：换一张 / 加一页 / 删除这页 */
