@@ -223,9 +223,7 @@ async function home(opts = {}) {
   view.innerHTML = `
     <div class="hero">
       <button class="btn primary big" id="btn-shoot">📷 拍照交作业</button>
-      <button class="btn primary big" id="btn-album">🖼 从相册选</button>
-      <button class="btn big" id="btn-wrong">📕 错题本</button>
-      <button class="btn big" id="btn-set">⚙️ 设置</button>
+      <button class="btn primary big" id="btn-album">🖼 从相册交作业</button>
     </div>
 
     <div class="filter-bar">
@@ -266,8 +264,6 @@ async function home(opts = {}) {
   const preferLesson = lessonFilter && lessonFilter !== '__none' ? lessonFilter : '';
   document.getElementById('btn-shoot').onclick = () => openUploadModal('shoot', textbooks, tbId, preferLesson);
   document.getElementById('btn-album').onclick = () => openUploadModal('album', textbooks, tbId, preferLesson);
-  document.getElementById('btn-wrong').onclick = () => (location.hash = '#/wrong');
-  document.getElementById('btn-set').onclick = () => (location.hash = '#/settings');
 
   // 记得住这次选的教材
   document.getElementById('tb-pick').onchange = async (e) => {

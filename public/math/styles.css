@@ -108,7 +108,9 @@ select::-ms-expand { display: none; }
 .empty { text-align: center; color: var(--ink-3); padding: 40px 10px; }
 
 /* ---------------- home ---------------- */
-.hero { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; }
+/* 首页只放两个交作业入口，平分整行宽度 */
+.hero { display: flex; gap: 10px; flex-wrap: nowrap; margin-bottom: 6px; }
+.hero .btn { flex: 1 1 0; min-width: 0; justify-content: center; white-space: nowrap; }
 
 /* 首页只看列表用的筛选条：一行放下教材 + 课文，尽量不占屏 */
 .filter-bar { display: flex; gap: 8px; align-items: center; margin: 10px 0 0; }
@@ -330,4 +332,6 @@ img.zoomable { cursor: zoom-in; }
   .brand { font-size: 15px; }
   .topnav { gap: 2px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .topnav a { padding: 5px 8px; font-size: 13px; white-space: nowrap; }
+  /* 两个按钮要平分 320px 这档的宽度，收一下内边距，别让字顶出去 */
+  .hero .btn.big { padding: 13px 8px; font-size: 15px; }
 }
