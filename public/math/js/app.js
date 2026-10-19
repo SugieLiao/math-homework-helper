@@ -544,7 +544,8 @@ async function submission(id) {
       </div>
       <div class="row wrap noprint" style="margin-top:10px">
         <button class="btn sm" id="btn-add-page">＋ 加一页</button>
-        <span class="small muted">照片拍糊了可以换一张；漏拍了一页可以加进来，只批改新加的这一页。</span>
+        <button class="btn sm" id="btn-recrop">🖼 重裁题目截图</button>
+        <span class="small muted">照片拍糊了可以换一张；漏拍了一页可以加进来，只批改新加的这一页；题目和图对不上就点「重裁」。</span>
       </div>
       ${
         s.paper_id
@@ -643,7 +644,8 @@ async function submission(id) {
     reBtn.onclick = async () => {
       try {
         busy('老师正在批改…（快速模式约 15～40 秒）');
-        await withTimeout(api.post(`/homework/${id}/grade`, {}), 180000);
+        const graded = await withTimeout(api.post(`/homework/${id}/grade`, {}), 180000);
+        await attachAnswerImages(id, graded.questions || []);
         idle();
         toast('批改完成');
         await submission(id);
@@ -651,6 +653,25 @@ async function submission(id) {
         idle();
         toast(e.message, 8000);
         await submission(id);
+      }
+    };
+  }
+
+  // 不重新批一遍，只按库里已有的答案位置重新裁图（多页作业以前全裁成第 1 页，用这个就能修回来）
+  const rcBtn = document.getElementById('btn-recrop');
+  if (rcBtn) {
+    rcBtn.onclick = async () => {
+      try {
+        busy('正在按题目位置重新裁截图…');
+        const d = await api.get(`/submissions/${id}`);
+        const list = (d.questions || []).map((q) => ({ id: q.id, page: q.page, band: bandOf(q.answer_band) }));
+        const n = await attachAnswerImages(id, list);
+        idle();
+        toast(n ? `已重新裁好 ${n} 张题目截图` : '这些题没有记录到位置信息，只能「重新批改」', 6000);
+        await submission(id);
+      } catch (e) {
+        idle();
+        toast(e.message, 8000);
       }
     };
   }
@@ -735,16 +756,64 @@ async function gradeOnePage(subId, pageId, blob, label) {
   busy(`${label} 老师正在批改…（约 15～40 秒，别关页面）`);
   const graded = await withTimeout(api.post(`/submissions/${subId}/pages/${pageId}/grade`, {}), 180000);
   const list = graded.questions || [];
-  for (const q of list) {
-    if (!q.band) continue;
-    const b = await cropBand(blob, q.band);
-    if (b) {
+  await attachAnswerImages(subId, list, [blob].filter(Boolean));
+  return list;
+}
+
+/** answer_band 在库里是 JSON 字符串、批改接口里是数组，两种都要吃 */
+function bandOf(v) {
+  if (Array.isArray(v)) return v.length >= 2 ? v : null;
+  if (!v) return null;
+  try {
+    const a = JSON.parse(v);
+    return Array.isArray(a) && a.length >= 2 ? a : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * 把每题的作答区域裁成小图传上去。
+ * blobs 有就直接用（刚上传完，手里就是原图）；没有（比如点「重新批改」「重裁截图」）就从服务器把各页原图拉回来。
+ * 关键：必须按 q.page 取对应那一页的图 —— 以前多页作业一律拿第 1 页裁，
+ * 第 2 页起的题目就都挂上了第 1 页的截图（题目和图对不上）。
+ */
+async function attachAnswerImages(subId, list, blobs) {
+  if (!list || !list.length) return 0;
+  let imgs = blobs && blobs.length ? blobs : null;
+  if (!imgs) {
+    const d = await api.get(`/submissions/${subId}`);
+    const pages = (d.pages || []).filter((p) => p.image_key);
+    const keys = pages.length
+      ? pages.map((p) => p.image_key)
+      : d.submission && d.submission.image_key
+        ? [d.submission.image_key]
+        : [];
+    if (!keys.length) return 0;
+    imgs = [];
+    for (const k of keys) {
       try {
-        await api.upload(`/questions/${q.id}/answer-image`, b, {});
-      } catch (e) { /* 裁剪图失败不影响批改结果 */ }
+        imgs.push(await (await fetch(api.imgUrl(k))).blob());
+      } catch (e) {
+        imgs.push(null);
+      }
     }
   }
-  return list;
+  let n = 0;
+  for (const q of list) {
+    const band = bandOf(q.band);
+    if (!band) continue;
+    const idx = Math.max(0, Math.min(imgs.length - 1, (Number(q.page) || 1) - 1));
+    const src = imgs[idx];
+    if (!src) continue;
+    const b = await cropBand(src, band);
+    if (!b) continue;
+    try {
+      await api.upload(`/questions/${q.id}/answer-image`, b, {});
+      n += 1;
+    } catch (e) { /* 单张失败不拦主流程 */ }
+  }
+  return n;
 }
 
 /** 换掉某一页的图片。先把图选好（用户手势里调起），再问旧题怎么处理，避免 iOS 拦截 */
@@ -2084,16 +2153,7 @@ async function uploadHomeworkFiles(files) {
     const graded = await withTimeout(api.post(`/homework/${subId}/grade`, {}), 240000);
     // 裁剪每题的作答图（用转码后的 JPEG 裁，HEIC 浏览器解不开）；多页要按题目所在页裁
     const list = graded.questions || [];
-    for (const q of list) {
-      if (!q.band) continue;
-      const idx = Math.max(0, Math.min(blobs.length - 1, (Number(q.page) || 1) - 1));
-      const blob = await cropBand(blobs[idx] || blobs[0], q.band);
-      if (blob) {
-        try {
-          await api.upload(`/questions/${q.id}/answer-image`, blob, {});
-        } catch (e) { /* 裁剪图失败不影响主流程 */ }
-      }
-    }
+    await attachAnswerImages(subId, list, blobs);
     idle();
     toast(`批改完成，共 ${list.length} 题${list0.length > 1 ? `（${list0.length} 页）` : ''}`);
     location.hash = `#/s/${subId}`;
@@ -2256,7 +2316,8 @@ async function handlePaperFile(input) {
     const up = await api.upload(`/papers/${pid}/answer`, small, {});
     subId = up.id;
     busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
-    await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
+    const graded = await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
+    await attachAnswerImages(up.id, graded.questions || [], [small]);
     idle();
     toast('批改完成');
     location.hash = `#/s/${up.id}`;

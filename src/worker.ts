@@ -836,6 +836,7 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   for (const q of list) {
     seq += 1;
     const qid = uuid();
+    const pageNo = Math.min(Math.max(Number(q.page) || 1, 1), pics.length);
     let band: number[] | null = null;
     if (Array.isArray(q.answer_band) && q.answer_band.length >= 2) {
       const a = Number(q.answer_band[0]) / bandScale;
@@ -862,12 +863,14 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
         String(q.error_reason ?? ''),
         String(q.solution ?? ''),
         String(q.knowledge ?? ''),
-        Math.min(Math.max(Number(q.page) || 1, 1), pics.length),
+        pageNo,
         band ? JSON.stringify(band) : null,
         now(),
       )
       .run();
-    created.push({ id: qid, seq, band });
+    // page 必须回给前端：多页作业时前端要按页码取对应那张图来裁作答图，
+    // 少了它前端会全部退回第 1 页，第 2 页起的题目就挂上第 1 页的截图。
+    created.push({ id: qid, seq, band, page: pageNo });
   }
   await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ?").bind(id).run();
   return json({ submission_id: id, questions: created });
