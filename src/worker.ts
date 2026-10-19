@@ -1424,8 +1424,10 @@ async function handleApi(
 
   if (p === '/paper-queue' && method === 'POST') {
     const body = await req.json<any>().catch(() => ({}));
-    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
+    const raw: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
+    const ids = [...new Set(raw.map(String))];
     if (!ids.length) throw new HttpError(400, '先勾选要加入的题目');
+    if (ids.length > 60) throw new HttpError(400, `一次最多加入 60 道题（这次 ${ids.length} 道），分批来吧。`);
     let added = 0;
     for (const qid of ids) {
       const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(String(qid)).first<any>();
@@ -1490,8 +1492,12 @@ async function handleApi(
     const s = await getSettings(env);
 
     const qs: any[] = [];
+    const seen = new Set<string>();
     for (const id of ids) {
-      const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(id).first<any>();
+      const qid = String(id);
+      if (seen.has(qid)) continue; // 同一道题被重复勾上时只算一次
+      seen.add(qid);
+      const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(qid).first<any>();
       if (q) qs.push(q);
     }
     if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新一下再试');
