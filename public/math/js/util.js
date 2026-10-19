@@ -197,8 +197,14 @@ export function cropBand(file, band) {
 }
 
 /* ------------------------------------------------ HEIC 自动转 JPEG */
-// iPhone 默认拍的是 HEIC，大模型读不了。这里用 libheif（WASM）在浏览器里解码成 JPEG。
-// 库有 1.3MB，只在真遇到 HEIC 时才动态加载，不影响其它场景。
+// iPhone 默认拍的是 HEIC，大模型读不了，得先转成 JPEG。
+//
+// 两条路，顺序很重要：
+//   1. 先让浏览器自己解（Safari / iOS 原生支持 HEIC，连 10-bit HDR 也能解）
+//   2. 浏览器解不了（Chrome / Firefox）再用 libheif WASM（1.3MB，按需加载）
+//
+// 反过来先上 WASM 会踩坑：iPhone 的 HDR 照片是 HEVC Main10，libheif 常常
+// 直接抛 ERR_LIBHEIF format not supported —— 但同一张图 Safari 本身能正常显示。
 
 let heicLoader = null;
 
@@ -211,8 +217,8 @@ function loadHeic2Any() {
     s.onload = () =>
       window.heic2any
         ? resolve(window.heic2any)
-        : reject(new Error('转换库加载后没生效，请把照片截图后再上传。'));
-    s.onerror = () => reject(new Error('转换库没下载下来（网络问题），请把照片截图后再上传。'));
+        : reject(new Error('转换库加载后没生效'));
+    s.onerror = () => reject(new Error('转换库没下载下来（网络问题）'));
     document.head.appendChild(s);
   }).catch((e) => {
     heicLoader = null; // 允许下次重试
@@ -235,20 +241,71 @@ async function convertHeicToJpeg(file) {
   return new File([blob], 'converted.jpg', { type: 'image/jpeg' });
 }
 
+let heicToLoader = null;
+
+/** 新版 libheif（heic-to，libheif 1.23）。体积大，只有前两层都失败时才加载 */
+function loadHeicTo() {
+  if (window.HeicTo) return Promise.resolve(window.HeicTo);
+  if (heicToLoader) return heicToLoader;
+  heicToLoader = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = '/math/vendor/heic-to.js';
+    s.onload = () =>
+      window.HeicTo ? resolve(window.HeicTo) : reject(new Error('备用转换库加载后没生效'));
+    s.onerror = () => reject(new Error('备用转换库没下载下来（网络问题）'));
+    document.head.appendChild(s);
+  }).catch((e) => {
+    heicToLoader = null;
+    throw e;
+  });
+  return heicToLoader;
+}
+
+async function convertHeicToJpegNew(file) {
+  const heicTo = await loadHeicTo();
+  const blob = await heicTo({ blob: file, type: 'image/jpeg', quality: 0.92 });
+  if (!blob) throw new Error('转换结果为空');
+  return new File([blob], 'converted.jpg', { type: 'image/jpeg' });
+}
+
 /**
  * 客户端压缩 + 统一转成 JPEG；遇到 HEIC 先自动转码。
  */
 export function compressImage(file, maxSide = 1600, quality = 0.85) {
   return (async () => {
-    let f = file;
-    if (isHeicFile(f)) {
-      try {
-        f = await convertHeicToJpeg(f);
-      } catch (e) {
-        throw new Error(`没能自动把 HEIC 转成 JPG：${e && e.message ? e.message : e}。请把照片截图后再上传。`);
-      }
+    if (!isHeicFile(file)) return compressToJpeg(file, maxSide, quality);
+
+    // 1) 浏览器原生解码（Safari 能直接读 HEIC）。补一个 image/heic 的 MIME：
+    //    有些相册导出的 File.type 是空的，blob URL 没类型时 Safari 可能不解码。
+    try {
+      const typed = file.type ? file : new Blob([file], { type: 'image/heic' });
+      return await compressToJpeg(typed, maxSide, quality);
+    } catch (e) {
+      /* 浏览器解不了，走 WASM */
     }
-    return compressToJpeg(f, maxSide, quality);
+
+    // 2) libheif WASM（heic2any，1.2MB）。绝大多数 HEIC 到这里就解决了。
+    let lastErr = null;
+    try {
+      const jpg = await convertHeicToJpeg(file);
+      return await compressToJpeg(jpg, maxSide, quality);
+    } catch (e2) {
+      lastErr = e2;
+    }
+
+    // 3) 新版 libheif（heic-to，3MB，跟到 libheif 1.23）。
+    //    专门兜 iPhone 的 10-bit HDR 这类老版本 libheif 不认的变体。
+    try {
+      const jpg = await convertHeicToJpegNew(file);
+      return await compressToJpeg(jpg, maxSide, quality);
+    } catch (e3) {
+      lastErr = e3;
+    }
+
+    const detail = lastErr && lastErr.message ? lastErr.message : String(lastErr);
+    throw new Error(
+      `这张 HEIC 照片解不开（${detail}），多半是 iPhone 的 HDR 格式。两个办法：① 在相册里把照片截图一下再传；② iPhone「设置 → 相机 → 格式」改成「兼容性最佳」，以后拍照直接就是 JPG。`,
+    );
   })();
 }
 

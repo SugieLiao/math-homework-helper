@@ -687,23 +687,33 @@ filePageAdd.addEventListener('change', async () => {
   const subId = pendingAddSubId;
   pendingAddSubId = null;
   if (!files.length || !subId) return;
+
   let total = 0;
-  try {
-    for (let i = 0; i < files.length; i++) {
-      const f = files[i];
+  let okCount = 0;
+  const failed = [];
+  for (let i = 0; i < files.length; i++) {
+    const f = files[i];
+    try {
       busy(isHeicFile(f) ? 'HEIC 照片正在转成 JPG…' : `第 ${i + 1}/${files.length} 张 · 上传中…`);
       const small = await compressImage(f);
       const up = await api.upload(`/submissions/${subId}/pages`, small, {});
       const list = await gradeOnePage(subId, up.page.id, small, `第 ${up.page.pos + 1} 页`);
       total += list.length;
+      okCount += 1;
+    } catch (e) {
+      // 一张失败不要拖累其它几张（多选时经常混着一张特殊格式的）
+      failed.push(`第 ${i + 1} 张：${e.message}`);
     }
-    idle();
+  }
+  idle();
+  if (okCount) await submission(subId);
+  if (failed.length) {
+    toast(
+      `加上 ${okCount} 页${total ? `（${total} 题）` : ''}，${failed.length} 张没成功。${failed[0]}`,
+      10000,
+    );
+  } else {
     toast(`已加上 ${files.length} 页，共识别出 ${total} 题`);
-    await submission(subId);
-  } catch (e) {
-    idle();
-    toast(e.message, 8000);
-    await submission(subId);
   }
 });
 
