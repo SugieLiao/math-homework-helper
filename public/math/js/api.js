@@ -41,14 +41,14 @@ export const api = {
   patch: (p, body) => request(p, { method: 'PATCH', body: JSON.stringify(body || {}) }),
   del: (p, body) => request(p, { method: 'DELETE', body: JSON.stringify(body || {}) }),
 
-  async upload(path, file, extra = {}) {
+  async upload(path, file, extra = {}, method = 'POST') {
     const fd = new FormData();
     fd.append('file', file);
     Object.entries(extra).forEach(([k, v]) => fd.append(k, v));
     const headers = {};
     const pass = getPasscode();
     if (pass) headers['X-Passcode'] = pass;
-    const res = await fetch(BASE + path, { method: 'POST', body: fd, headers });
+    const res = await fetch(BASE + path, { method, body: fd, headers });
     if (res.status === 401) {
       if (onUnauthorized) onUnauthorized();
       throw new Error('需要家庭口令');

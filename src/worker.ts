@@ -809,8 +809,11 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   }
   bandScale = bandScale > 100 ? bandScale / 100 : 1;
 
-  // 重新批改时先清掉上一轮的题，避免重复
-  await env.DB.prepare('DELETE FROM questions WHERE submission_id = ?').bind(id).run();
+  // 重新批改时先清掉上一轮的题，避免重复。
+  // 用 deleteQuestion 而不是裸 DELETE：它会把举一反三记录和 R2 里的裁剪图一起清掉，
+  // 否则 variants 变成指向不存在母题的孤儿，图和存储配额也一直漏。
+  const oldQs = await env.DB.prepare('SELECT id FROM questions WHERE submission_id = ?').bind(id).all<any>();
+  for (const r of oldQs.results || []) await deleteQuestion(env, r.id);
 
   const created: any[] = [];
   let seq = 0;
@@ -852,6 +855,159 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
   }
   await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ?").bind(id).run();
   return json({ submission_id: id, questions: created });
+}
+
+/** 读上传的表单图片，统一做 HEIC / 大小校验（图片编辑接口共用） */
+async function readImageForm(req: Request): Promise<{ buf: ArrayBuffer; ext: string }> {
+  const form = await req.formData();
+  const file = form.get('file') as File | null;
+  if (!file) throw new HttpError(400, '没有收到图片');
+  const ext = extOf(file.name);
+  if (ext === 'heic' || ext === 'heif') {
+    throw new HttpError(
+      400,
+      'HEIC 格式的照片大模型读不了。请在 iPhone「设置 → 相机 → 格式」里改成「兼容性最佳」（以后拍照就是 JPG），或者把照片截图后再上传。',
+    );
+  }
+  if (file.size > 10 * 1024 * 1024) throw new HttpError(400, '图片太大了（超过 10MB），请压缩或截图后再传。');
+  return { buf: await file.arrayBuffer(), ext };
+}
+
+/** 按「页 → 页内顺序」重排 seq（删页/加页后调用，保证题目按页顺序编号） */
+async function renumberQuestionsByPage(env: Env, subId: string): Promise<void> {
+  const rows = await env.DB.prepare(
+    'SELECT id FROM questions WHERE submission_id = ? ORDER BY COALESCE(page, 9999) ASC, seq ASC',
+  )
+    .bind(subId)
+    .all<any>();
+  let i = 0;
+  for (const r of rows.results || []) {
+    i += 1;
+    await env.DB.prepare('UPDATE questions SET seq = ? WHERE id = ?').bind(i, r.id).run();
+  }
+}
+
+/**
+ * 只批改一页（换图后重批、或新增一页后补批）。
+ *
+ * 为什么不复用 gradeHomework：整份重批是「删光所有题再重建」，会把别的页上
+ * 已经人工改判过、做过举一反三、有掌握度记录的题全清掉。家长只是换了第 2 页，
+ * 不该动到第 1 页。所以这里只动这一页，新题 seq 接在现有题目后面。
+ */
+async function gradePage(env: Env, subId: string, pageId: string): Promise<Response> {
+  const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subId).first<any>();
+  if (!sub) throw new HttpError(404, '提交不存在');
+  const pgs = await env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC')
+    .bind(subId)
+    .all<any>();
+  const all = pgs.results || [];
+  const idx = all.findIndex((r: any) => r.id === pageId);
+  if (idx < 0) throw new HttpError(404, '这一页不存在，刷新一下再试');
+  const pageKey = all[idx].image_key;
+  if (!pageKey) throw new HttpError(404, '这一页还没有图片');
+  const obj = await env.IMAGES.get(pageKey);
+  if (!obj) throw new HttpError(404, '这张图找不到了，重新传一张');
+  const buf = await obj.arrayBuffer();
+  if (buf.byteLength > 9 * 1024 * 1024) {
+    throw new HttpError(413, '这张照片太大了，大模型不接受。请截图或压缩后再传。');
+  }
+  const s = await getSettings(env);
+  const pageNo = idx + 1;
+
+  let userPrompt =
+    `这份作业一共 ${all.length} 页，下面这张照片是第 ${pageNo} 页。只批改这一页上出现的题目，不要臆测其它页。` +
+    `每道题的 page 一律写 ${pageNo}，answer_band 按这一页自己的纵向百分比给。\n\n` +
+    gradeUserPrompt(s.grade);
+
+  // 组卷答卷：把原卷题目和正确答案一并给模型当校对依据
+  if (sub.paper_id) {
+    const items = await env.DB.prepare('SELECT pos, stem, answer FROM paper_items WHERE paper_id = ? ORDER BY pos ASC')
+      .bind(sub.paper_id)
+      .all<any>();
+    const rows = items.results || [];
+    if (rows.length) {
+      userPrompt +=
+        '\n\n【这份卷子原本的题目和正确答案，供你校对（学生答案仍以图片上手写的为准，图片上没写的就是没作答）】\n' +
+        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n');
+    }
+  }
+
+  const text = await llm(env, gradeSystemPrompt(s.grade), userPrompt, {
+    imageBase64: toBase64(buf),
+    imageType: contentTypeOf(pageKey),
+    temperature: 0.1,
+    maxTokens: 4000,
+    thinking: (s.thinking_mode as any) || 'fast',
+  });
+
+  let parsed: any;
+  try {
+    parsed = extractJson(text);
+  } catch {
+    throw new HttpError(502, `大模型没有返回可解析的内容（可能是题目太小/图片太糊）。原始回复：${text.slice(0, 160)}`);
+  }
+  const list: any[] = Array.isArray(parsed?.questions) ? parsed.questions : [];
+  if (!list.length) throw new HttpError(502, '这一页没能识别出题目，换一张更清楚的再试一次。');
+
+  // 模型常把 answer_band 给成像素坐标，取最大值等比归一（同 gradeHomework）
+  let bandScale = 1;
+  for (const q of list) {
+    const b = Array.isArray(q.answer_band) ? q.answer_band : null;
+    if (!b) continue;
+    for (const v of b) if (typeof v === 'number' && v > bandScale) bandScale = v;
+  }
+  bandScale = bandScale > 100 ? bandScale / 100 : 1;
+
+  // 这一页原有的题先清掉：要么调用方选了「删旧题重批」，要么这页本来就是新加的
+  const old = await env.DB.prepare('SELECT id FROM questions WHERE submission_id = ? AND page = ?')
+    .bind(subId, pageNo)
+    .all<any>();
+  for (const r of old.results || []) await deleteQuestion(env, r.id);
+
+  const mx = await env.DB.prepare('SELECT MAX(seq) AS m FROM questions WHERE submission_id = ?').bind(subId).first<any>();
+  let seq = Number(mx?.m || 0);
+  const created: any[] = [];
+  for (const q of list) {
+    seq += 1;
+    const qid = uuid();
+    let band: number[] | null = null;
+    if (Array.isArray(q.answer_band) && q.answer_band.length >= 2) {
+      const a = Number(q.answer_band[0]) / bandScale;
+      const b2 = Number(q.answer_band[1]) / bandScale;
+      if (Number.isFinite(a) && Number.isFinite(b2) && b2 > a) {
+        band = [Math.max(0, Math.min(100, Math.round(a))), Math.max(0, Math.min(100, Math.round(b2)))];
+      }
+    }
+    await env.DB.prepare(
+      `INSERT INTO questions
+       (id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
+        error_reason, solution, knowledge, page, answer_band, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    )
+      .bind(
+        qid,
+        subId,
+        seq,
+        String(q.no ?? seq),
+        String(q.stem ?? ''),
+        String(q.student_answer ?? ''),
+        String(q.correct_answer ?? ''),
+        q.is_correct ? 1 : 0,
+        String(q.error_reason ?? ''),
+        String(q.solution ?? ''),
+        String(q.knowledge ?? ''),
+        pageNo,
+        band ? JSON.stringify(band) : null,
+        now(),
+      )
+      .run();
+    created.push({ id: qid, seq, band, page: pageNo });
+  }
+  // 重批这一页后，本页的题 seq 会排在别的页后面（旧题删掉留下的空档），
+  // 按「页 → 页内顺序」重排一次，题目列表才不会一页的题分成两段显示。
+  await renumberQuestionsByPage(env, subId);
+  await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ?").bind(subId).run();
+  return json({ submission_id: subId, page: pageNo, questions: created });
 }
 
 async function handleApi(
@@ -1630,6 +1786,118 @@ async function handleApi(
     return json({ submissions: out });
   }
 
+  /* ------------------- 作业图片编辑：加页 / 换图 / 删页 / 单页重批 ------------------- */
+
+  const subPagesMatch = /^\/submissions\/([a-z0-9]+)\/pages$/.exec(p);
+  const subPageMatch = /^\/submissions\/([a-z0-9]+)\/pages\/([a-z0-9]+)$/.exec(p);
+  const subPageGradeMatch = /^\/submissions\/([a-z0-9]+)\/pages\/([a-z0-9]+)\/grade$/.exec(p);
+
+  // 加一页（追加到末尾）
+  if (subPagesMatch && method === 'POST') {
+    const subId = subPagesMatch[1];
+    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subId).first<any>();
+    if (!sub) throw new HttpError(404, '这份作业不存在，刷新一下再试');
+    const { buf, ext } = await readImageForm(req);
+    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
+      .bind(subId)
+      .first<any>();
+    const n = Number(cnt?.c || 0);
+    if (n >= 8) throw new HttpError(400, '一份作业最多 8 页，多了分成两份交吧。');
+    const pageId = uuid();
+    const key = `page/${subId}-${pageId}.${ext}`;
+    await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
+    await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,?,?,?)')
+      .bind(pageId, subId, n, key, now())
+      .run();
+    // 组卷作业原本没有 image_key，列表缩略图要指到第一页
+    if (!sub.image_key) {
+      await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?').bind(key, subId).run();
+    }
+    return json({ page: { id: pageId, pos: n, image_key: key } });
+  }
+
+  // 换掉某一页的图片（不动已批改的题目，是否重批由前端决定）
+  if (subPageMatch && method === 'PUT') {
+    const subId = subPageMatch[1];
+    const pageId = subPageMatch[2];
+    const pg = await env.DB.prepare('SELECT * FROM submission_pages WHERE id = ? AND submission_id = ?')
+      .bind(pageId, subId)
+      .first<any>();
+    if (!pg) throw new HttpError(404, '这一页不存在，刷新一下再试');
+    const { buf, ext } = await readImageForm(req);
+    // key 里带一段随机：图片 URL 是按 key 拼的，key 不变的话浏览器会一直放旧图（换完看不到新照片）
+    const key = `page/${subId}-${pageId}-${uuid().slice(0, 6)}.${ext}`;
+    await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
+    await env.DB.prepare('UPDATE submission_pages SET image_key = ? WHERE id = ?').bind(key, pageId).run();
+    if (pg.image_key && pg.image_key !== key) await env.IMAGES.delete(pg.image_key).catch(() => {});
+    if (Number(pg.pos) === 0) {
+      await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?').bind(key, subId).run();
+    }
+    return json({ page: { id: pageId, pos: Number(pg.pos), image_key: key } });
+  }
+
+  // 删掉某一页。?keep=1 → 保留这一页已批改的题目（page 置空）；否则题目一起删
+  if (subPageMatch && method === 'DELETE') {
+    const subId = subPageMatch[1];
+    const pageId = subPageMatch[2];
+    const keepRaw = String(url.searchParams.get('keep') || '').toLowerCase();
+    const keep = keepRaw === '1' || keepRaw === 'true' || keepRaw === 'yes';
+
+    const pgs = await env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC')
+      .bind(subId)
+      .all<any>();
+    const all = pgs.results || [];
+    const target = all.find((r: any) => r.id === pageId);
+    if (!target) throw new HttpError(404, '这一页不存在，刷新一下再试');
+    if (all.length <= 1) {
+      throw new HttpError(400, '作业至少要留一页。想整份删掉，点下面的「删除这份作业」。');
+    }
+
+    const pageNo = Number(target.pos) + 1;
+    const qs = await env.DB.prepare('SELECT id FROM questions WHERE submission_id = ? AND page = ?')
+      .bind(subId, pageNo)
+      .all<any>();
+    const qids = (qs.results || []).map((r: any) => r.id);
+    if (keep) {
+      await env.DB.prepare('UPDATE questions SET page = NULL WHERE submission_id = ? AND page = ?')
+        .bind(subId, pageNo)
+        .run();
+    } else {
+      for (const qid of qids) await deleteQuestion(env, qid);
+    }
+
+    await env.DB.prepare('DELETE FROM submission_pages WHERE id = ?').bind(pageId).run();
+    if (target.image_key) await env.IMAGES.delete(target.image_key).catch(() => {});
+
+    // 后面的页依次前移，并把它们名下题目的 page 一起改掉（要用旧值做映射，不能边改边查）
+    const rest = all.filter((r: any) => r.id !== pageId);
+    const map = new Map<number, number>();
+    rest.forEach((r: any, i: number) => map.set(Number(r.pos) + 1, i + 1));
+    for (let i = 0; i < rest.length; i++) {
+      await env.DB.prepare('UPDATE submission_pages SET pos = ? WHERE id = ?').bind(i, rest[i].id).run();
+    }
+    const remaining = await env.DB.prepare('SELECT id, page FROM questions WHERE submission_id = ?')
+      .bind(subId)
+      .all<any>();
+    for (const q of remaining.results || []) {
+      if (q.page == null) continue;
+      const np = map.get(Number(q.page));
+      if (np && np !== Number(q.page)) {
+        await env.DB.prepare('UPDATE questions SET page = ? WHERE id = ?').bind(np, q.id).run();
+      }
+    }
+    await renumberQuestionsByPage(env, subId);
+    await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?')
+      .bind(rest[0]?.image_key || null, subId)
+      .run();
+    return json({ ok: true, deleted_questions: keep ? 0 : qids.length, kept_questions: keep ? qids.length : 0 });
+  }
+
+  // 只重批某一页
+  if (subPageGradeMatch && method === 'POST') {
+    return gradePage(env, subPageGradeMatch[1], subPageGradeMatch[2]);
+  }
+
   const subMatch = /^\/submissions\/([a-z0-9]+)$/.exec(p);
   if (subMatch && method === 'GET') {
     const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subMatch[1]).first<any>();
@@ -1644,7 +1912,14 @@ async function handleApi(
       .bind(sub.id)
       .all<any>();
     let pages = (pgs.results || []).filter((r: any) => r.image_key);
-    if (!pages.length && sub.image_key) pages = [{ id: 'legacy', submission_id: sub.id, pos: 0, image_key: sub.image_key }];
+    if (!pages.length && sub.image_key) {
+      // 多页功能上线前的老作业没有页记录：补一条，这样它也能换图 / 加页
+      const pid = uuid();
+      await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)')
+        .bind(pid, sub.id, sub.image_key, now())
+        .run();
+      pages = [{ id: pid, submission_id: sub.id, pos: 0, image_key: sub.image_key }];
+    }
     return json({ submission: sub, questions, pages });
   }
 

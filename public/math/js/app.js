@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog, openImage } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, openImage } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -398,14 +398,34 @@ async function submission(id) {
         <span class="badge ${qs.filter((q) => !Number(q.is_correct)).length ? 'wrong' : 'pass'}">
           错 ${qs.filter((q) => !Number(q.is_correct)).length} 题</span>
       </div>
-      ${pages
-        .map(
-          (p, i) =>
-            `<img class="ans-img zoomable" src="${api.imgUrl(p.image_key)}" alt="作业原图 第${i + 1}页${
-              pages.length > 1 ? `（共${pages.length}页）` : ''
-            }" style="max-height:420px" />`,
-        )
-        .join('')}
+      <div class="page-list">
+        ${pages
+          .map((p, i) => {
+            const cnt = qs.filter((q) => Number(q.page) === i + 1).length;
+            return `<div class="page-item">
+              <img class="ans-img zoomable" src="${api.imgUrl(p.image_key)}" alt="作业原图 第${i + 1}页${
+                pages.length > 1 ? `（共${pages.length}页）` : ''
+              }" />
+              <div class="row wrap page-bar noprint">
+                <span class="small muted">第 ${i + 1} 页${pages.length > 1 ? ` / ${pages.length}` : ''}${
+                  cnt ? ` · ${cnt} 题` : ' · 还没批改'
+                }</span>
+                <span class="spacer"></span>
+                <button class="btn sm" data-replace="${esc(p.id)}">🔄 换一张</button>
+                ${
+                  pages.length > 1
+                    ? `<button class="btn sm danger" data-delpage="${esc(p.id)}">删除这页</button>`
+                    : ''
+                }
+              </div>
+            </div>`;
+          })
+          .join('')}
+      </div>
+      <div class="row wrap noprint" style="margin-top:10px">
+        <button class="btn sm" id="btn-add-page">＋ 加一页</button>
+        <span class="small muted">照片拍糊了可以换一张；漏拍了一页可以加进来，只批改新加的这一页。</span>
+      </div>
       ${
         s.paper_id
           ? `<div class="row wrap" style="margin-top:8px"><span class="tag">组卷</span>
@@ -546,7 +566,189 @@ async function submission(id) {
     };
   }
 
+  /* 图片编辑：换一张 / 加一页 / 删除这页 */
+  const addPageBtn = document.getElementById('btn-add-page');
+  if (addPageBtn) {
+    addPageBtn.onclick = () => {
+      pendingAddSubId = id;
+      filePageAdd.value = '';
+      // 同步调起（multiple 且不设 capture，系统会同时给「拍照 / 照片图库 / 选取文件」）
+      filePageAdd.click();
+    };
+  }
+  view.querySelectorAll('[data-replace]').forEach((b) => {
+    b.onclick = () => {
+      const pageId = b.dataset.replace;
+      const idx = pages.findIndex((p) => p.id === pageId);
+      if (idx < 0) return;
+      pendingReplace = {
+        subId: id,
+        pageId,
+        pageNo: idx + 1,
+        qCount: qs.filter((q) => Number(q.page) === idx + 1).length,
+      };
+      filePageReplace.value = '';
+      // 关键：必须在点击的这一刻同步调起选图。先 await 弹个确认框再 click() 会被 iOS 拦掉。
+      filePageReplace.click();
+    };
+  });
+  view.querySelectorAll('[data-delpage]').forEach((b) => {
+    b.onclick = () => {
+      const pageId = b.dataset.delpage;
+      const idx = pages.findIndex((p) => p.id === pageId);
+      if (idx < 0) return;
+      deletePageFlow(id, pageId, idx + 1, qs.filter((q) => Number(q.page) === idx + 1).length);
+    };
+  });
+
   bindCards();
+}
+
+/* ------------------------------------------------ 作业图片编辑 */
+
+let pendingReplace = null; // { subId, pageId, pageNo, qCount }
+let pendingAddSubId = null;
+const filePageReplace = document.getElementById('file-page-replace');
+const filePageAdd = document.getElementById('file-page-add');
+
+/** 只批改一页，并把每题的作答区域从这一页的图上裁出来 */
+async function gradeOnePage(subId, pageId, blob, label) {
+  busy(`${label}老师正在批改…（约 15～40 秒，别关页面）`);
+  const graded = await withTimeout(api.post(`/submissions/${subId}/pages/${pageId}/grade`, {}), 180000);
+  const list = graded.questions || [];
+  for (const q of list) {
+    if (!q.band) continue;
+    const b = await cropBand(blob, q.band);
+    if (b) {
+      try {
+        await api.upload(`/questions/${q.id}/answer-image`, b, {});
+      } catch (e) { /* 裁剪图失败不影响批改结果 */ }
+    }
+  }
+  return list;
+}
+
+/** 换掉某一页的图片。先把图选好（用户手势里调起），再问旧题怎么处理，避免 iOS 拦截 */
+filePageReplace.addEventListener('change', async () => {
+  const info = pendingReplace;
+  pendingReplace = null;
+  const file = filePageReplace.files && filePageReplace.files[0];
+  filePageReplace.value = '';
+  if (!file || !info) return;
+
+  let keep = false;
+  if (info.qCount > 0) {
+    const pick = await choiceDialog({
+      title: `换掉第 ${info.pageNo} 页的照片`,
+      message: `这一页已经批改出 ${info.qCount} 道题。换图之后这些题怎么处理？`,
+      options: [
+        {
+          value: 'keep',
+          label: '保留旧题，只换图',
+          hint: '题目、对错判定、举一反三记录都留着，不再重新批改这一页',
+          style: 'primary',
+        },
+        {
+          value: 'regrade',
+          label: '删掉旧题，按新图重批',
+          hint: `这一页的 ${info.qCount} 道题和它们的举一反三记录会被删掉，重新识别`,
+          style: 'danger',
+        },
+      ],
+    });
+    if (!pick) return;
+    keep = pick === 'keep';
+  }
+
+  try {
+    busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
+    const small = await compressImage(file);
+    await api.upload(`/submissions/${info.subId}/pages/${info.pageId}`, small, {}, 'PUT');
+    if (keep) {
+      idle();
+      toast(`第 ${info.pageNo} 页已换好，题目没动`);
+    } else {
+      const list = await gradeOnePage(info.subId, info.pageId, small, `第 ${info.pageNo} 页`);
+      idle();
+      toast(`第 ${info.pageNo} 页重新批改完成，识别出 ${list.length} 题`);
+    }
+    await submission(info.subId);
+  } catch (e) {
+    idle();
+    toast(e.message, 8000);
+    await submission(info.subId);
+  }
+});
+
+/** 加页：每加一张就单独批这一页（不整份重批，别的页的题和改判都不动） */
+filePageAdd.addEventListener('change', async () => {
+  const files = Array.from(filePageAdd.files || []);
+  filePageAdd.value = '';
+  const subId = pendingAddSubId;
+  pendingAddSubId = null;
+  if (!files.length || !subId) return;
+  let total = 0;
+  try {
+    for (let i = 0; i < files.length; i++) {
+      const f = files[i];
+      busy(isHeicFile(f) ? 'HEIC 照片正在转成 JPG…' : `第 ${i + 1}/${files.length} 张 · 上传中…`);
+      const small = await compressImage(f);
+      const up = await api.upload(`/submissions/${subId}/pages`, small, {});
+      const list = await gradeOnePage(subId, up.page.id, small, `第 ${up.page.pos + 1} 页`);
+      total += list.length;
+    }
+    idle();
+    toast(`已加上 ${files.length} 页，共识别出 ${total} 题`);
+    await submission(subId);
+  } catch (e) {
+    idle();
+    toast(e.message, 8000);
+    await submission(subId);
+  }
+});
+
+/** 删除某一页。有题就问用户：题目一起删，还是把题目留下 */
+async function deletePageFlow(subId, pageId, pageNo, qCount) {
+  let keep = false;
+  if (qCount > 0) {
+    const pick = await choiceDialog({
+      title: `删除第 ${pageNo} 页`,
+      message: `这一页已经批改出 ${qCount} 道题。删掉这张照片后，这些题怎么办？`,
+      options: [
+        {
+          value: 'keep',
+          label: '保留题目',
+          hint: '题目、作答图和举一反三记录都留着，只是不再有这一页的原图',
+          style: 'primary',
+        },
+        {
+          value: 'drop',
+          label: '连题目一起删掉',
+          hint: `这一页的 ${qCount} 道题和它们的举一反三记录会被删除，无法恢复`,
+          style: 'danger',
+        },
+      ],
+    });
+    if (!pick) return;
+    keep = pick === 'keep';
+  } else {
+    const ok = await confirmDialog('这一页还没有批改出题目，删掉只是去掉这张照片。', {
+      title: `删掉第 ${pageNo} 页？`,
+      okText: '删除',
+    });
+    if (!ok) return;
+  }
+  busy('删除中…');
+  try {
+    await api.del(`/submissions/${subId}/pages/${pageId}?keep=${keep ? 1 : 0}`);
+    idle();
+    toast(keep ? '已删除这一页，题目保留' : '已删除这一页和它的题目');
+    await submission(subId);
+  } catch (e) {
+    idle();
+    toast(e.message, 6000);
+    await submission(subId);
+  }
 }
 
 /* ------------------------------------------------ 错题本 */

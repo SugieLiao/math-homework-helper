@@ -308,3 +308,52 @@ export function fileToDataUrl(file) {
     r.readAsDataURL(file);
   });
 }
+
+/**
+ * 多选项确认框：每个选项是一个带说明的大按钮。
+ * options: [{ value, label, hint?, style?: 'primary' | 'danger' }]
+ * 返回 Promise<value | null>；点取消 / 点遮罩 / Esc → null。
+ */
+export function choiceDialog(opts = {}) {
+  const options = opts.options || [];
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `
+      <div class="modal-card confirm-card" role="dialog" aria-modal="true">
+        <h3>${esc(opts.title || '请确认')}</h3>
+        <div class="confirm-msg">${esc(opts.message || '').replace(/\n/g, '<br/>')}</div>
+        <div class="choice-list">
+          ${options
+            .map(
+              (o, i) => `<button class="btn choice-btn ${o.style || ''}" data-i="${i}">
+                <span class="choice-label">${esc(o.label)}</span>
+                ${o.hint ? `<span class="choice-hint">${esc(o.hint)}</span>` : ''}
+              </button>`,
+            )
+            .join('')}
+        </div>
+        <div class="row-end"><button class="btn" data-act="cancel">${esc(opts.cancelText || '取消')}</button></div>
+      </div>`;
+    document.body.appendChild(wrap);
+    let closed = false;
+    const done = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') done(null);
+    };
+    wrap.querySelectorAll('[data-i]').forEach((b) => {
+      b.onclick = () => done(options[Number(b.dataset.i)].value);
+    });
+    wrap.querySelector('[data-act=cancel]').onclick = () => done(null);
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(null);
+    });
+    document.addEventListener('keydown', onKey);
+  });
+}
