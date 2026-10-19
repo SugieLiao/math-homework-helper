@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, openImage } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, openImage } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -878,9 +878,12 @@ filePageReplace.addEventListener('change', async () => {
     keep = pick === 'keep';
   }
 
+  const picked = await cropDialog(file, { title: `选第 ${info.pageNo} 页要用的范围` });
+  if (!picked) return;
+
   try {
-    busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
-    const small = await compressImage(file);
+    busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
+    const small = await compressImage(picked);
     await api.upload(`/submissions/${info.subId}/pages/${info.pageId}`, small, {}, 'PUT');
     if (keep) {
       idle();
@@ -912,7 +915,8 @@ filePageAdd.addEventListener('change', async () => {
 
   // 阶段一：全部上传（每张 1～2 秒）
   for (let i = 0; i < files.length; i++) {
-    const f = files[i];
+    const f = await cropDialog(files[i], { index: i + 1, total: files.length });
+    if (!f) continue; // 这张不要了，跳过
     try {
       busy(
         files.length > 1
@@ -2198,7 +2202,8 @@ async function uploadHomeworkFiles(files) {
 /* ------------------------------------------------ 待上传照片托盘 */
 // 手机系统一次往往只肯给一张（拍照必然如此，部分机型/内置浏览器的相册也只让单选）。
 // 所以先把照片攒进这个托盘：可以反复「再拍一张 / 再选几张」，攒够了再一次性上传、一次批改。
-let trayFiles = [];
+let trayFiles = []; // 已经裁剪好的（要上传的）
+let trayOrigins = []; // 与上面一一对应的原始照片，重新裁剪时从原图开始
 let trayKind = 'album'; // 'shoot' | 'album'
 let trayUrls = [];
 const MAX_PAGES = 8;
@@ -2237,6 +2242,7 @@ function renderShotsTray() {
       return `<div class="tray-item">
         <img class="tray-img" src="${url}" alt="第 ${i + 1} 页" />
         <span class="tray-no">${i + 1}</span>
+        <button class="tray-crop" data-crop="${i}" title="重新裁剪">✂</button>
         <button class="tray-del" data-del="${i}" title="删掉这一张">×</button>
       </div>`;
     })
@@ -2255,7 +2261,7 @@ function renderShotsTray() {
         ${cells}
         ${canAdd ? `<button class="tray-add" id="tray-add"><span>＋</span><em>再${verb}一张</em></button>` : ''}
       </div>
-      <div class="hint">${canAdd ? '每张照片算这份作业的一页，选错的点 × 删掉。' : `一次最多 ${MAX_PAGES} 页，多的分两次交。`}</div>
+      <div class="hint">${canAdd ? '每张照片算这份作业的一页。点 ✂ 重新框选范围，点 × 删掉这张。' : `一次最多 ${MAX_PAGES} 页，多的分两次交。`}</div>
       ${canAdd ? `<div class="tray-other">${other}</div>` : ''}
       <div class="row-end" style="margin-top:14px">
         <button class="btn" id="tray-cancel">取消</button>
@@ -2264,26 +2270,64 @@ function renderShotsTray() {
     </div>`;
 }
 
-function addToTray(files, kind) {
+/**
+ * 照片进托盘之前先让用户框选范围：逐张弹裁剪框，确认后只留框里的部分。
+ * 用户点「不用这张」就跳过那张；「用原图」保留整张。
+ */
+async function addToTray(files, kind) {
   if (kind) trayKind = kind;
   const room = MAX_PAGES - trayFiles.length;
   if (room <= 0) {
     toast(`一次最多 ${MAX_PAGES} 页，这批先上传吧`, 6000);
     return;
   }
-  trayFiles.push(...files.slice(0, room));
+  const picked = files.slice(0, room);
   if (files.length > room) toast(`一次最多 ${MAX_PAGES} 页，多出的 ${files.length - room} 张没加进来`, 6000);
+
+  let kept = 0;
+  for (let i = 0; i < picked.length; i++) {
+    const out = await cropDialog(picked[i], { index: i + 1, total: picked.length });
+    if (out) {
+      trayFiles.push(out);
+      trayOrigins.push(picked[i]);
+      kept += 1;
+    }
+  }
+  if (!kept) {
+    // 全部取消了：托盘里还有别的页就回到托盘，没有就关掉
+    if (trayFiles.length) renderShotsTray();
+    else {
+      trayFiles = [];
+      trayOrigins = [];
+      closeShotsTray();
+    }
+    return;
+  }
   renderShotsTray();
 }
 
 // 托盘里的按钮都用事件委托，重渲染后不用重新绑
-document.addEventListener('click', (e) => {
+document.addEventListener('click', async (e) => {
   const t = e.target;
   if (!t || !t.closest || !t.closest('#shot-tray')) return;
 
+  const recrop = t.closest('.tray-crop');
+  if (recrop) {
+    const i = Number(recrop.dataset.crop);
+    if (!trayFiles[i]) return;
+    // 从原始照片重新裁，而不是在已裁过的图上再裁一次
+    const out = await cropDialog(trayOrigins[i] || trayFiles[i], { title: `重新裁剪第 ${i + 1} 页` });
+    if (out) {
+      trayFiles[i] = out;
+      renderShotsTray();
+    }
+    return;
+  }
   const del = t.closest('.tray-del');
   if (del) {
-    trayFiles.splice(Number(del.dataset.del), 1);
+    const i = Number(del.dataset.del);
+    trayFiles.splice(i, 1);
+    trayOrigins.splice(i, 1);
     renderShotsTray();
     return;
   }
@@ -2306,12 +2350,14 @@ document.addEventListener('click', (e) => {
   }
   if (t.closest('#tray-cancel')) {
     trayFiles = [];
+    trayOrigins = [];
     closeShotsTray();
     return;
   }
   if (t.closest('#tray-go')) {
     const shots = trayFiles.slice();
     trayFiles = [];
+    trayOrigins = [];
     closeShotsTray();
     uploadHomeworkFiles(shots);
   }
@@ -2339,10 +2385,12 @@ async function handlePaperFile(input) {
   const file = input.files && input.files[0];
   input.value = '';
   if (!file || !pid) return;
+  const picked = await cropDialog(file, { title: '选要批改的范围' });
+  if (!picked) return;
   let subId = null;
   try {
-    busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
-    const small = await compressImage(file);
+    busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
+    const small = await compressImage(picked);
     const up = await api.upload(`/papers/${pid}/answer`, small, {});
     subId = up.id;
     busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');

@@ -252,6 +252,35 @@ img.zoomable { cursor: zoom-in; }
 .tray-img { width: 100%; height: 100%; object-fit: cover; display: block; cursor: zoom-in; }
 .tray-no { position: absolute; left: 5px; bottom: 5px; background: rgba(20,24,35,.62); color: #fff; font-size: 11px; padding: 1px 6px; border-radius: 999px; }
 .tray-del { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(20,24,35,.6); color: #fff; font-size: 15px; line-height: 1; padding: 0; cursor: pointer; }
+.tray-crop { position: absolute; top: 4px; left: 4px; width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(20,24,35,.6); color: #fff; font-size: 12px; line-height: 1; padding: 0; cursor: pointer; }
+
+/* ---------------- 交作业前自己框选范围 ---------------- */
+.crop-modal .modal-card { max-width: 520px; }
+.crop-sub { margin: -12px 0 10px; }
+.crop-stage { position: relative; background: #0f1423; border-radius: 12px; overflow: hidden; line-height: 0; touch-action: none; user-select: none; -webkit-user-select: none; }
+.crop-img { display: block; width: auto; height: auto; max-width: 100%; max-height: 56vh; margin: 0 auto; touch-action: none; -webkit-user-drag: none; }
+.crop-loading { color: #fff; font-size: 13px; line-height: 1.6; text-align: center; padding: 46px 12px; }
+.crop-box { position: absolute; box-sizing: border-box; border: 2px solid #fff; box-shadow: 0 0 0 9999px rgba(8,12,24,.5); cursor: move; }
+.crop-h { position: absolute; width: 18px; height: 18px; box-sizing: border-box; background: var(--primary); border: 2px solid #fff; border-radius: 50%; }
+.crop-h[data-h=nw] { left: -9px; top: -9px; cursor: nwse-resize; }
+.crop-h[data-h=n] { left: 50%; top: -9px; margin-left: -9px; cursor: ns-resize; }
+.crop-h[data-h=ne] { right: -9px; top: -9px; cursor: nesw-resize; }
+.crop-h[data-h=e] { right: -9px; top: 50%; margin-top: -9px; cursor: ew-resize; }
+.crop-h[data-h=se] { right: -9px; bottom: -9px; cursor: nwse-resize; }
+.crop-h[data-h=s] { left: 50%; bottom: -9px; margin-left: -9px; cursor: ns-resize; }
+.crop-h[data-h=sw] { left: -9px; bottom: -9px; cursor: nesw-resize; }
+.crop-h[data-h=w] { left: -9px; top: 50%; margin-top: -9px; cursor: ew-resize; }
+.crop-ops { align-items: center; gap: 10px; margin-top: 10px; }
+@media (max-width: 560px) {
+  .crop-img { max-height: 48vh; }
+  .crop-h { width: 22px; height: 22px; }
+  .crop-h[data-h=nw], .crop-h[data-h=sw] { left: -11px; }
+  .crop-h[data-h=ne], .crop-h[data-h=se], .crop-h[data-h=e] { right: -11px; }
+  .crop-h[data-h=n], .crop-h[data-h=s] { margin-left: -11px; }
+  .crop-h[data-h=n], .crop-h[data-h=ne], .crop-h[data-h=nw] { top: -11px; }
+  .crop-h[data-h=s], .crop-h[data-h=se], .crop-h[data-h=sw] { bottom: -11px; }
+  .crop-h[data-h=e], .crop-h[data-h=w] { margin-top: -11px; }
+}
 .tray-add { aspect-ratio: 3 / 4; border: 1.5px dashed #c4cddd; border-radius: 10px; background: #f7f9fc; color: var(--primary); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; padding: 0; }
 .tray-add span { font-size: 26px; line-height: 1; }
 .tray-add em { font-style: normal; font-size: 12px; color: var(--ink-2); }

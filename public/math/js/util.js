@@ -347,6 +347,256 @@ function compressToJpeg(file, maxSide, quality) {
   });
 }
 
+/* ------------------------------------------------ 选范围裁剪（交作业前） */
+/**
+ * 拍完 / 选完照片后，让用户自己框出要上传的那部分。
+ * 支持拖动选区、拖四角四边改大小；「用原图」跳过裁剪，「不用这张」放弃。
+ * 返回 Promise<File|null>：null 表示用户放弃这张照片。
+ * opts: { title?, index?, total? }
+ */
+export function cropDialog(file, opts = {}) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal crop-modal';
+    const autoTitle =
+      opts.total && opts.total > 1
+        ? `第 ${opts.index || 1}/${opts.total} 张 · 选要上传的范围`
+        : '选要上传的范围';
+    wrap.innerHTML = `
+      <div class="modal-card crop-card" role="dialog" aria-modal="true">
+        <h3>${esc(opts.title || autoTitle)}</h3>
+        <p class="small muted crop-sub">在图上拖一个框，只框住要批改的部分；拖框移动，拖四角或四边改大小。</p>
+        <div class="crop-stage">
+          <div class="crop-loading">正在准备图片…</div>
+        </div>
+        <div class="row wrap crop-ops">
+          <button class="btn sm" data-act="full">全选整张</button>
+          <span class="small muted" data-act="size"></span>
+        </div>
+        <div class="row-end">
+          <button class="btn" data-act="skip">不用这张</button>
+          <button class="btn" data-act="raw">用原图</button>
+          <button class="btn primary" data-act="ok">确定</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+
+    const MIN = 24; // 选区最小边长（屏幕像素）
+    const stage = wrap.querySelector('.crop-stage');
+    const sizeLabel = wrap.querySelector('[data-act=size]');
+    const box = document.createElement('div');
+    box.className = 'crop-box hidden';
+    box.innerHTML = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
+      .map((h) => `<span class="crop-h" data-h="${h}"></span>`)
+      .join('');
+    stage.appendChild(box);
+
+    let url = null;
+    let decoded = null; // 解出来的 JPEG（HEIC 已转好），「用原图」就返回它
+    let img = null;
+    let W = 0;
+    let H = 0;
+    let OX = 0;
+    let OY = 0; // 图片在舞台里的偏移（图片居中时不为 0）
+    let sel = null;
+    let drag = null;
+    let closed = false;
+
+    const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    function done(v) {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onUp);
+      document.removeEventListener('keydown', onKey);
+      if (url) {
+        try {
+          URL.revokeObjectURL(url);
+        } catch (e) {
+          /* 忽略 */
+        }
+      }
+      wrap.remove();
+      resolve(v);
+    }
+
+    /** 量出图片实际显示的位置和尺寸（图片居中 / 等比缩放时，和舞台不重合） */
+    function measure() {
+      if (!img) return;
+      const ir = img.getBoundingClientRect();
+      const sr = stage.getBoundingClientRect();
+      W = ir.width;
+      H = ir.height;
+      OX = ir.left - sr.left;
+      OY = ir.top - sr.top;
+    }
+
+    function apply() {
+      if (!sel || !W) return;
+      box.style.left = `${OX + sel.x}px`;
+      box.style.top = `${OY + sel.y}px`;
+      box.style.width = `${sel.w}px`;
+      box.style.height = `${sel.h}px`;
+      const sc = (img && img.naturalWidth ? img.naturalWidth : W) / (W || 1);
+      sizeLabel.textContent = `选中 ${Math.round(sel.w * sc)} × ${Math.round(sel.h * sc)}`;
+    }
+
+    function selectAll() {
+      sel = { x: 0, y: 0, w: W, h: H };
+      apply();
+    }
+
+    function onDown(e) {
+      if (!img || !W) return;
+      if (e.button && e.button !== 0) return;
+      measure();
+      const h = e.target && e.target.dataset ? e.target.dataset.h : null;
+      if (h) {
+        drag = { mode: 'resize', h, sx: e.clientX, sy: e.clientY, orig: { ...sel } };
+      } else if (e.target === box) {
+        drag = { mode: 'move', sx: e.clientX, sy: e.clientY, orig: { ...sel } };
+      } else {
+        const ir = img.getBoundingClientRect();
+        const x = clamp(e.clientX - ir.left, 0, W);
+        const y = clamp(e.clientY - ir.top, 0, H);
+        drag = { mode: 'new', ox: x, oy: y };
+        sel = { x, y, w: 0, h: 0 };
+        apply();
+      }
+      if (e.preventDefault) e.preventDefault();
+    }
+
+    function onMove(e) {
+      if (!drag) return;
+      const dx = e.clientX - drag.sx;
+      const dy = e.clientY - drag.sy;
+      if (drag.mode === 'move') {
+        sel = {
+          ...drag.orig,
+          x: clamp(drag.orig.x + dx, 0, W - drag.orig.w),
+          y: clamp(drag.orig.y + dy, 0, H - drag.orig.h),
+        };
+      } else if (drag.mode === 'resize') {
+        let { x, y, w, h } = drag.orig;
+        const hh = drag.h;
+        if (hh.indexOf('w') >= 0) {
+          const nx = clamp(x + dx, 0, x + w - MIN);
+          w = x + w - nx;
+          x = nx;
+        }
+        if (hh.indexOf('e') >= 0) w = clamp(w + dx, MIN, W - x);
+        if (hh.indexOf('n') >= 0) {
+          const ny = clamp(y + dy, 0, y + h - MIN);
+          h = y + h - ny;
+          y = ny;
+        }
+        if (hh.indexOf('s') >= 0) h = clamp(h + dy, MIN, H - y);
+        sel = { x, y, w, h };
+      } else {
+        const ir = img.getBoundingClientRect();
+        const cx = clamp(e.clientX - ir.left, 0, W);
+        const cy = clamp(e.clientY - ir.top, 0, H);
+        sel = {
+          x: Math.min(drag.ox, cx),
+          y: Math.min(drag.oy, cy),
+          w: Math.abs(cx - drag.ox),
+          h: Math.abs(cy - drag.oy),
+        };
+      }
+      apply();
+    }
+
+    function onUp() {
+      if (!drag) return;
+      drag = null;
+      // 手一抖点了一下：选区太小就退回整张
+      if (!sel || sel.w < MIN || sel.h < MIN) selectAll();
+      apply();
+    }
+
+    function onKey(e) {
+      if (e.key === 'Escape') done(null);
+      else if (e.key === 'Enter') doCrop();
+    }
+
+    function doCrop() {
+      if (!img || !sel) return done(decoded || null);
+      try {
+        measure();
+        const sc = (img.naturalWidth || W) / (W || 1);
+        const sx = Math.round(sel.x * sc);
+        const sy = Math.round(sel.y * sc);
+        const sw = Math.max(1, Math.round(sel.w * sc));
+        const sh = Math.max(1, Math.round(sel.h * sc));
+        if (sw >= (img.naturalWidth || sw) - 2 && sh >= (img.naturalHeight || sh) - 2) {
+          return done(decoded); // 整张就别再压一遍
+        }
+        const c = document.createElement('canvas');
+        c.width = sw;
+        c.height = sh;
+        const ctx = c.getContext('2d');
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(0, 0, sw, sh);
+        ctx.drawImage(img, sx, sy, sw, sh, 0, 0, sw, sh);
+        c.toBlob(
+          (b) => {
+            if (!b) return done(decoded);
+            done(new File([b], 'crop.jpg', { type: 'image/jpeg' }));
+          },
+          'image/jpeg',
+          0.92,
+        );
+      } catch (e) {
+        done(decoded);
+      }
+    }
+
+    wrap.querySelector('[data-act=full]').onclick = selectAll;
+    wrap.querySelector('[data-act=skip]').onclick = () => done(null);
+    wrap.querySelector('[data-act=raw]').onclick = () => done(decoded);
+    wrap.querySelector('[data-act=ok]').onclick = doCrop;
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(null);
+    });
+    stage.addEventListener('pointerdown', onDown);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+    document.addEventListener('keydown', onKey);
+
+    // 先解码（HEIC 会自动转 JPEG），再显示出来让用户框选
+    compressImage(file, 1800, 0.92)
+      .then((jpg) => {
+        decoded = jpg;
+        url = URL.createObjectURL(jpg);
+        img = new Image();
+        img.className = 'crop-img';
+        img.onload = () => {
+          stage.appendChild(img);
+          stage.appendChild(box);
+          const ld = stage.querySelector('.crop-loading');
+          if (ld) ld.remove();
+          measure();
+          selectAll();
+          box.classList.remove('hidden');
+          const okBtn = wrap.querySelector('[data-act=ok]');
+          if (okBtn && okBtn.focus) okBtn.focus();
+        };
+        img.onerror = () => {
+          toast('这张图片打不开，换一张试试', 5000);
+          done(null);
+        };
+        img.src = url;
+      })
+      .catch((e) => {
+        toast(e && e.message ? e.message : '这张图片处理失败', 6000);
+        done(null);
+      });
+  });
+}
+
 /** 给 Promise 加超时，避免长请求把界面卡在「加载中」 */
 export function withTimeout(promise, ms, message) {
   return Promise.race([
