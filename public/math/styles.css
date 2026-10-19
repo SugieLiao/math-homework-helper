@@ -272,3 +272,45 @@ img.zoomable { cursor: zoom-in; }
 .sk-btn { height: 48px; border-radius: 14px; }
 .sk-bar { height: 40px; border-radius: 10px; margin: 10px 0 2px; }
 @media (prefers-reduced-motion: reduce) { .sk-btn, .sk-bar { animation: none; } }
+
+/* ---------------- 组卷页 ---------------- */
+/* 注意要压过上面的 .field label（display:block / 13px / 加粗） */
+.field label.opt-line, .opt-line {
+  display: flex; align-items: flex-start; gap: 8px; padding: 9px 11px;
+  border: 1px solid var(--line); border-radius: 10px; margin-bottom: 8px;
+  background: #fbfcff; cursor: pointer; font-size: 14px;
+  color: var(--ink); font-weight: 400;
+}
+.opt-line:last-child { margin-bottom: 0; }
+.opt-line input { margin-top: 4px; flex: 0 0 auto; accent-color: var(--primary); width: 17px; height: 17px; }
+.opt-line span { min-width: 0; }
+
+/* 待组卷题目多的时候给个内部滚动，别把下面的「组卷设置」推得太远 */
+.q-scroll { max-height: 62vh; overflow-y: auto; overscroll-behavior: contain; }
+
+.paper-row {
+  display: flex; align-items: center; gap: 10px; padding: 12px 14px;
+  text-decoration: none; color: inherit; border-bottom: 1px solid var(--line);
+}
+.paper-row:last-child { border-bottom: none; }
+
+/* 加完题后底部的浮条：直达组卷 */
+.queue-tip {
+  position: fixed; left: 50%; bottom: 18px; z-index: 90;
+  transform: translate(-50%, 160%); transition: transform .22s ease;
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px 8px 14px;
+  background: #1f2430; color: #fff; border-radius: 999px;
+  box-shadow: 0 8px 24px rgba(31, 36, 48, .28);
+  max-width: calc(100vw - 20px); pointer-events: none;
+}
+.queue-tip.on { transform: translate(-50%, 0); pointer-events: auto; }
+.queue-tip .qt-text { font-size: 13px; white-space: nowrap; }
+.queue-tip .btn { padding: 4px 10px; font-size: 13px; border-radius: 999px; }
+
+/* 顶部导航多了「组卷」一项，窄屏要收一点才放得下 */
+@media (max-width: 560px) {
+  .topbar { padding: 9px 10px; gap: 8px; }
+  .brand { font-size: 15px; }
+  .topnav { gap: 2px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .topnav a { padding: 5px 8px; font-size: 13px; white-space: nowrap; }
+}

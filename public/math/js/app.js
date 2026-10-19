@@ -502,14 +502,14 @@ async function submission(id) {
       qs.length
         ? `<div class="card noprint" id="sp-bar">
       <div class="row wrap">
-        <b>组卷：已选 <span id="sp-sel">0</span> 题</b>
+        <b>待组卷：已选 <span id="sp-sel">0</span> 题</b>
         <span class="spacer"></span>
         <button class="btn sm" id="btn-sp-wrong">只选错题</button>
         <button class="btn sm" id="btn-sp-all">全选</button>
         <button class="btn sm" id="btn-sp-none">清空</button>
-        <button class="btn primary" id="btn-sp-paper">📝 组卷</button>
+        <button class="btn primary" id="btn-sp-paper">＋ 加入组卷</button>
       </div>
-      <div class="hint">勾选要练的题目（进来时已经帮你把做错的都选上了），点「组卷」按每道题出几道类似题，凑成一张可打印的练习卷。</div>
+      <div class="hint">勾选要练的题目（进来时已经帮你把做错的都选上了），点「加入组卷」放进待组卷；攒够了去顶部「组卷」页统一出卷。</div>
     </div>`
         : ''
     }
@@ -605,10 +605,8 @@ async function submission(id) {
       const ids = pboxes()
         .filter((b) => b.checked)
         .map((b) => b.dataset.id);
-      if (!ids.length) return toast('先勾选要做卷的题目');
-      const d = new Date();
-      const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-      paperDialog(ids, { title: '作业组卷', defTitle: `作业练习卷 ${md}` });
+      if (!ids.length) return toast('先勾选要加入的题目');
+      addToQueue(ids);
     };
   }
 
@@ -933,10 +931,10 @@ async function wrongBook() {
         <span class="spacer"></span>
         <button class="btn sm" id="btn-w-all">全选</button>
         <button class="btn sm" id="btn-w-none">清空</button>
-        <button class="btn primary" id="btn-make-paper">📝 错题组卷</button>
+        <button class="btn primary" id="btn-make-paper">＋ 加入组卷</button>
         <button class="btn danger sm" id="btn-w-del">🗑 删除所选</button>
       </div>
-      <div class="hint">勾选题目（可以按课文或整个单元批量选），点「错题组卷」凑成一张可打印的练习卷；点「删除所选」把不再需要的错题清掉。</div>
+      <div class="hint">勾选题目（可以按课文或整个单元批量选），点「加入组卷」先放进待组卷；攒够了去顶部「组卷」页，选母题、选方式，一次出卷。点「删除所选」把不再需要的错题清掉。</div>
     </div>
     ${wrongs.length ? html : '<div class="empty">还没有错题记录</div>'}`;
 
@@ -970,8 +968,8 @@ async function wrongBook() {
   refreshCount();
   document.getElementById('btn-make-paper').onclick = () => {
     const ids = boxes().filter((b) => b.checked).map((b) => b.dataset.id);
-    if (!ids.length) return toast('先勾选要做卷的错题');
-    paperDialog(ids);
+    if (!ids.length) return toast('先勾选要加入的错题');
+    addToQueue(ids);
   };
 
   const doDeleteWrong = async (ids) => {
@@ -999,72 +997,375 @@ async function wrongBook() {
   });
 }
 
-/* 组卷设置弹窗：每道错题出几道 + 顺序/乱序 + 标题 */
-function paperDialog(questionIds, opts = {}) {
-  const wrap = document.createElement('div');
-  wrap.className = 'modal';
+/* 把勾选的题目加入「待组卷」。
+   改版后不再当场组卷：作业详情页 / 错题本只负责往纸篓里丢题，
+   攒够了一次去「组卷」页统一选母题、选方式、选归属，再出卷。 */
+async function addToQueue(questionIds) {
+  const ids = (questionIds || []).filter(Boolean);
+  if (!ids.length) return toast('先勾选要加入的题目');
+  try {
+    busy('加入待组卷…');
+    const r = await api.post('/paper-queue', { question_ids: ids });
+    idle();
+    if (!r.added) toast(`这 ${ids.length} 道题都已在待组卷里了`);
+    else toast(`已加入待组卷 ${r.added} 道${r.skipped ? `（${r.skipped} 道本来就在）` : ''}，共 ${r.total} 道`);
+    showQueueTip(r.total);
+  } catch (e) {
+    idle();
+    toast(e.message);
+  }
+}
+
+/* 加完题后在底部浮一条，给个直达「组卷」的入口，不用自己去找 */
+function showQueueTip(total) {
+  let el = document.getElementById('queue-tip');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'queue-tip';
+    el.className = 'queue-tip';
+    document.body.appendChild(el);
+  }
+  el.innerHTML = `
+    <span class="qt-text">📝 待组卷 <b>${total}</b> 道</span>
+    <a class="btn sm primary" href="#/compose" id="qt-go">去组卷</a>
+    <button class="btn sm" id="qt-close">知道了</button>`;
+  el.classList.add('on');
+  el.querySelector('#qt-close').onclick = () => el.classList.remove('on');
+  el.querySelector('#qt-go').onclick = () => el.classList.remove('on');
+}
+function hideQueueTip() {
+  const el = document.getElementById('queue-tip');
+  if (el) el.classList.remove('on');
+}
+
+/* ------------------------------------------------ 组卷页 */
+/* 组卷 = 三步：① 待组卷题目里勾母题 ② 选组卷方式/顺序 ③ 选教材单元课文 → 出卷。
+   出完的卷子立刻变成一份「未作答」的作业，所以它同时出现在这里和作业列表里。 */
+async function composePage() {
+  view.innerHTML = listSkeleton('正在加载待组卷题目…', 4);
+  let textbooks = [];
+  let queue = [];
+  let papers = [];
+  let units = [];
+  try {
+    const [tbRes, qRes, pRes] = await Promise.all([api.get('/textbooks'), api.get('/paper-queue'), api.get('/papers')]);
+    textbooks = tbRes.textbooks || [];
+    queue = qRes.items || [];
+    papers = pRes.papers || [];
+  } catch (e) {
+    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+
+  const stored = localStorage.getItem(TB_KEY);
+  const tbId0 = stored && textbooks.some((t) => t.id === stored) ? stored : textbooks[0]?.id || '';
+  if (tbId0) {
+    try {
+      units = (await api.get(`/textbook?textbook=${encodeURIComponent(tbId0)}`)).units || [];
+    } catch (e) {
+      units = [];
+    }
+  }
+
   const d = new Date();
-  const defTitle =
-    opts.defTitle || `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-  wrap.innerHTML = `
-    <div class="modal-card">
-      <h3>${esc(opts.title || '错题组卷')}</h3>
-      <p class="small muted" style="margin-top:-6px">已选 ${questionIds.length} 道题</p>
+  const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  const srcOf = (q) => {
+    const when = q.sub_created_at ? `${fmtDate(q.sub_created_at)} 的作业` : '来源不明';
+    const where = q.lesson_name || q.unit_name || '未归类';
+    return `${when} · ${where}`;
+  };
+
+  const itemHtml = (q) => `
+    <div class="wrong-item" data-row="${esc(q.id)}">
+      <input type="checkbox" class="qcheck" data-id="${esc(q.id)}" style="width:20px;height:20px;flex:0 0 auto;margin-top:2px" />
+      <div style="flex:1;min-width:0">
+        <div class="row wrap">
+          <span class="q-no">${esc(q.no || '')}.</span>
+          <span class="badge ${Number(q.is_correct) === 1 ? 'pass' : 'wrong'}">${
+            Number(q.is_correct) === 1 ? '做对了' : '做错了'
+          }</span>
+          ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
+          <span class="spacer"></span>
+          <button class="btn sm" data-unqueue="${esc(q.id)}">移出</button>
+        </div>
+        <div class="stem" style="margin:4px 0">${nl2br(q.stem)}</div>
+        <div class="small muted">来源：${esc(srcOf(q))}</div>
+      </div>
+    </div>`;
+
+  const paperRow = (p) => {
+    const place = [p.textbook_name, p.unit_name, p.lesson_name].filter(Boolean).join(' › ');
+    const state =
+      p.status !== 'final'
+        ? '<span class="badge gray">草稿</span>'
+        : p.sub_status === 'graded'
+          ? '<span class="badge pass">已批改</span>'
+          : p.sub_status === 'grading'
+            ? '<span class="badge gray">批改中</span>'
+            : '<span class="badge info">未作答</span>';
+    return `<a class="paper-row" href="#/paper/${esc(p.id)}">
+      <div style="flex:1;min-width:0">
+        <div style="font-weight:600">📝 ${esc(p.title)} ${state}</div>
+        <div class="small muted">${fmtDate(p.created_at)} · ${p.item_count} 题${place ? ` · ${esc(place)}` : ''}</div>
+      </div>
+      <span class="muted" style="flex:0 0 auto">›</span>
+    </a>`;
+  };
+
+  const unitOpts = (list) =>
+    `<option value="">— 不选，只归到教材 —</option>` +
+    list.map((u) => `<option value="${esc(u.id)}">${esc(u.name)}</option>`).join('');
+  const lessonOpts = (u) =>
+    `<option value="">— 不选 —</option>` + ((u?.lessons || []).map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`).join('') || '');
+
+  view.innerHTML = `
+    <h2 style="margin-top:0">组卷</h2>
+    <div class="card noprint">
+      <div class="row wrap">
+        <b>待组卷题目</b>
+        <span class="badge info">${queue.length} 道</span>
+        <span class="spacer"></span>
+        <button class="btn sm" id="btn-q-all">全选</button>
+        <button class="btn sm" id="btn-q-none">清空选择</button>
+        <button class="btn danger sm" id="btn-q-clear">🗑 清空待组卷</button>
+      </div>
+      <div class="hint">在「作业」详情页或「错题本」里勾选题目，点「加入组卷」就攒到这里。下面勾的是这次要用的母题。</div>
+      <div class="small" style="margin-top:6px">本次已选 <b id="q-sel">0</b> 道母题</div>
+    </div>
+    ${
+      queue.length
+        ? `<div class="card ${queue.length > 8 ? 'q-scroll' : ''}" style="padding:0" id="q-list">${queue
+            .map(itemHtml)
+            .join('')}</div>`
+        : `<div class="card"><div class="empty">还没有待组卷的题目。<br/>去「作业」详情页或「错题本」勾选题目，点「加入组卷」。</div>
+             <div class="row" style="justify-content:center"><a class="btn" href="#/wrong">去错题本挑题</a></div></div>`
+    }
+
+    <div class="section-title">组卷设置</div>
+    <div class="card">
       <div class="field">
-        <label>每道题出几道类似题</label>
-        <select id="pp-per">
-          <option value="1">1 道</option>
-          <option value="2" selected>2 道</option>
-          <option value="3">3 道</option>
-          <option value="4">4 道</option>
-          <option value="5">5 道</option>
-        </select>
-        <div class="hint">卷子一共大约 ${questionIds.length * 2} 道题</div>
+        <label>组卷方式</label>
+        <label class="opt-line"><input type="radio" name="cm-mode" value="original" />
+          <span><b>只用原题</b><span class="small muted">　原样拼成一张卷，马上出</span></span></label>
+        <label class="opt-line"><input type="radio" name="cm-mode" value="variant" checked />
+          <span><b>举一反三</b><span class="small muted">　每道母题再出几道同类新题</span></span></label>
+      </div>
+      <div id="cm-variant">
+        <div class="field">
+          <label>每道母题出几道类似题</label>
+          <select id="cm-per">
+            ${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n} 道</option>`).join('')}
+          </select>
+        </div>
+        <div class="field">
+          <label class="opt-line"><input type="checkbox" id="cm-orig" checked />
+            <span>卷子里也带上原题<span class="small muted">　原题排在它自己的类似题前面</span></span></label>
+        </div>
       </div>
       <div class="field">
         <label>题目顺序</label>
-        <select id="pp-order">
-          <option value="1">顺序（按错题原顺序排）</option>
+        <select id="cm-order">
+          <option value="1">顺序（按母题顺序排）</option>
           <option value="0">乱序（打乱后排出）</option>
         </select>
       </div>
       <div class="field">
+        <label>教材（必选）</label>
+        ${
+          textbooks.length
+            ? `<select id="cm-tb">${textbooks
+                .map((t) => `<option value="${esc(t.id)}" ${t.id === tbId0 ? 'selected' : ''}>${esc(t.name)}</option>`)
+                .join('')}</select>`
+            : `<div class="hint" style="color:var(--wrong)">还没有教材，先去<a href="#/textbook">大纲</a>里建一本。</div>`
+        }
+      </div>
+      <div class="field">
+        <label>单元（可不选）</label>
+        <select id="cm-unit" ${textbooks.length ? '' : 'disabled'}>${unitOpts(units)}</select>
+      </div>
+      <div class="field">
+        <label>课文（可不选）</label>
+        <select id="cm-lesson" ${textbooks.length ? '' : 'disabled'}>${lessonOpts(units[0])}</select>
+        <div class="hint">教材必选；单元 / 课文可以不选。选了以后这张卷子就挂在对应的单元、课文下面，作业列表里一筛就出来。</div>
+      </div>
+      <div class="field">
         <label>卷子标题</label>
-        <input type="text" id="pp-title" value="${esc(defTitle)}" />
+        <input type="text" id="cm-title" value="练习卷 ${md}" />
       </div>
-      <div class="row-end">
-        <button class="btn" id="pp-cancel">取消</button>
-        <button class="btn primary" id="pp-go">开始组卷</button>
+      <div class="row wrap">
+        <span class="small muted" id="cm-est">先在上面勾选母题</span>
+        <span class="spacer"></span>
+        <button class="btn primary" id="cm-go" disabled>📝 开始组卷</button>
       </div>
-    </div>`;
-  document.body.appendChild(wrap);
-  const close = () => wrap.remove();
-  wrap.addEventListener('click', (e) => {
-    if (e.target === wrap) close();
-  });
-  wrap.querySelector('#pp-cancel').onclick = close;
-  wrap.querySelector('#pp-per').onchange = (e) => {
-    wrap.querySelector('.hint').textContent = `卷子一共大约 ${questionIds.length * Number(e.target.value)} 道题`;
+    </div>
+
+    <div class="section-title">我的试卷</div>
+    ${
+      papers.length
+        ? `<div class="card" style="padding:0">${papers.map(paperRow).join('')}</div>`
+        : `<div class="card"><div class="empty">还没有组过卷。上面挑好母题就能出第一张。</div></div>`
+    }`;
+
+  /* ---- 勾选与计数 ---- */
+  const boxes = () => Array.from(view.querySelectorAll('.qcheck'));
+  const checkedIds = () => boxes().filter((b) => b.checked).map((b) => b.dataset.id);
+  const mode = () => view.querySelector('input[name=cm-mode]:checked')?.value || 'variant';
+  const per = () => Number(document.getElementById('cm-per')?.value || 1);
+  const withOrig = () => !!document.getElementById('cm-orig')?.checked;
+  const estimate = () => {
+    const n = checkedIds().length;
+    if (!n) return 0;
+    return mode() === 'original' ? n : n * per() + (withOrig() ? n : 0);
   };
-  wrap.querySelector('#pp-go').onclick = async () => {
-    const body = {
-      question_ids: questionIds,
-      per: Number(wrap.querySelector('#pp-per').value),
-      ordered: Number(wrap.querySelector('#pp-order').value),
-      title: wrap.querySelector('#pp-title').value.trim(),
-    };
-    close();
+  const refresh = () => {
+    const n = checkedIds().length;
+    const selEl = document.getElementById('q-sel');
+    if (selEl) selEl.textContent = String(n);
+    const est = estimate();
+    const estEl = document.getElementById('cm-est');
+    const goBtn = document.getElementById('cm-go');
+    if (estEl) {
+      estEl.textContent = !n
+        ? '先在上面勾选母题'
+        : mode() === 'original'
+          ? `这一卷 ${est} 道原题`
+          : `这一卷大约 ${est} 道题${withOrig() ? `（含 ${n} 道原题）` : ''}`;
+    }
+    if (goBtn) goBtn.disabled = !n || !textbooks.length;
+  };
+  boxes().forEach((b) => (b.onchange = refresh));
+  // 手机上点整行就能勾选，不用精准点那个小方框
+  view.querySelectorAll('[data-row]').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      if (e.target.closest('button') || e.target.closest('a') || e.target.tagName === 'INPUT') return;
+      const cb = row.querySelector('.qcheck');
+      if (!cb) return;
+      cb.checked = !cb.checked;
+      refresh();
+    });
+  });
+  document.getElementById('btn-q-all').onclick = () => {
+    boxes().forEach((b) => (b.checked = true));
+    refresh();
+  };
+  document.getElementById('btn-q-none').onclick = () => {
+    boxes().forEach((b) => (b.checked = false));
+    refresh();
+  };
+  document.getElementById('btn-q-clear').onclick = async () => {
+    if (!queue.length) return toast('待组卷已经是空的');
+    const ok = await confirmDialog('待组卷里的题目会被全部移出（题目本身不会删）。', {
+      title: `清空这 ${queue.length} 道待组卷题目？`,
+      okText: '清空',
+    });
+    if (!ok) return;
     try {
-      busy(`老师在出卷…（${questionIds.length} 道题，大约 30 秒）`);
-      const r = await withTimeout(api.post('/papers', body), 150000);
+      busy('清空中…');
+      await api.del('/paper-queue', { all: true });
       idle();
-      toast(`出了 ${r.count} 道题`);
-      location.hash = `#/paper/${r.id}`;
+      toast('已清空');
+      await composePage();
     } catch (e) {
       idle();
-      toast(e.message, 6000);
+      toast(e.message);
     }
   };
+  view.querySelectorAll('[data-unqueue]').forEach((b) => {
+    b.onclick = async () => {
+      try {
+        await api.del('/paper-queue', { question_ids: [b.dataset.unqueue] });
+        toast('已移出待组卷');
+        await composePage();
+      } catch (e) {
+        toast(e.message);
+      }
+    };
+  });
+
+  /* ---- 方式切换 ---- */
+  view.querySelectorAll('input[name=cm-mode]').forEach((r) => {
+    r.onchange = () => {
+      const variant = mode() === 'variant';
+      const box = document.getElementById('cm-variant');
+      if (box) box.classList.toggle('hidden', !variant);
+      const titleEl = document.getElementById('cm-title');
+      // 标题还是默认值时才跟着换，用户自己改过就别动
+      if (titleEl && /^(练习卷|原题练习卷) \d\d-\d\d$/.test(titleEl.value.trim())) {
+        titleEl.value = `${variant ? '练习卷' : '原题练习卷'} ${md}`;
+      }
+      refresh();
+    };
+  });
+  document.getElementById('cm-per').onchange = refresh;
+  document.getElementById('cm-orig').onchange = refresh;
+
+  /* ---- 教材 → 单元 → 课文 三级联动 ---- */
+  const tbSel = document.getElementById('cm-tb');
+  const unSel = document.getElementById('cm-unit');
+  const lsSel = document.getElementById('cm-lesson');
+  if (tbSel) {
+    tbSel.onchange = async () => {
+      localStorage.setItem(TB_KEY, tbSel.value);
+      try {
+        units = (await api.get(`/textbook?textbook=${encodeURIComponent(tbSel.value)}`)).units || [];
+      } catch (e) {
+        units = [];
+      }
+      unSel.innerHTML = unitOpts(units);
+      lsSel.innerHTML = lessonOpts(units[0]);
+    };
+  }
+  if (unSel) {
+    unSel.onchange = () => {
+      const u = units.find((x) => x.id === unSel.value);
+      lsSel.innerHTML = lessonOpts(u);
+    };
+  }
+
+  /* ---- 出卷 ---- */
+  const goBtn = document.getElementById('cm-go');
+  if (goBtn) {
+    goBtn.onclick = async () => {
+      const ids = checkedIds();
+      if (!ids.length) return toast('先在待组卷里勾选母题');
+      const tb = tbSel ? tbSel.value : '';
+      if (!tb) return toast('先选一本教材');
+      const m = mode();
+      const body = {
+        question_ids: ids,
+        mode: m,
+        per: m === 'variant' ? per() : 1,
+        include_original: m === 'variant' ? withOrig() : false,
+        ordered: Number(document.getElementById('cm-order').value),
+        textbook_id: tb,
+        unit_id: unSel ? unSel.value : '',
+        lesson_id: lsSel ? lsSel.value : '',
+        title: document.getElementById('cm-title').value.trim(),
+      };
+      const total = m === 'original' ? ids.length : ids.length * per() + (withOrig() ? ids.length : 0);
+      if (total > 60) {
+        return toast(`这次会出 ${total} 道题，一张卷最多 60 道。少选几道母题，或把每道出的数量调小一点。`, 7000);
+      }
+      goBtn.disabled = true;
+      try {
+        busy(
+          m === 'original'
+            ? '正在把原题拼成卷子…'
+            : `老师在出卷…（${ids.length} 道母题，约 ${Math.min(120, 20 + total * 2)} 秒）`,
+        );
+        const r = await withTimeout(api.post('/papers', body), 240000);
+        idle();
+        toast(`出了 ${r.count} 道题${r.removed_from_queue ? '，已从待组卷移出' : ''}`, 6000);
+        location.hash = `#/paper/${r.id}`;
+      } catch (e) {
+        idle();
+        goBtn.disabled = false;
+        toast(e.message, 8000);
+      }
+    };
+  }
+  refresh();
 }
 
 /* 归类弹窗：教材必选，单元 / 课文可选。用于「确认组卷」时决定这张卷子挂在作业列表的哪儿。
@@ -1742,18 +2043,22 @@ function hideRouteBar() {
 async function route() {
   const seq = ++routeSeq;
   showRouteBar();
+  hideQueueTip();
   const hash = location.hash.replace(/^#/, '') || '/';
   document.querySelectorAll('.topnav a').forEach((a) => {
     const nav = a.dataset.nav;
     const active =
       nav === '/'
-        ? hash === '/' || hash.startsWith('/s/') || hash.startsWith('/q/') || hash.startsWith('/print/') || hash.startsWith('/paper')
-        : hash.startsWith(nav);
+        ? hash === '/' || hash.startsWith('/s/') || hash.startsWith('/q/') || hash.startsWith('/print/')
+        : nav === '/compose'
+          ? hash.startsWith('/compose') || hash.startsWith('/paper')
+          : hash.startsWith(nav);
     a.classList.toggle('active', active);
   });
 
   try {
     if (hash === '/' || hash === '') return await home();
+    if (hash.startsWith('/compose')) return await composePage();
     if (hash.startsWith('/textbook/l/')) return await home({ lesson: hash.slice('/textbook/l/'.length) });
     if (hash.startsWith('/textbook')) return await renderTextbook();
     if (hash.startsWith('/s/')) return await submission(hash.slice(3));

@@ -668,6 +668,8 @@ async function deleteQuestion(env: Env, id: string): Promise<void> {
   });
   await env.DB.prepare('DELETE FROM variants WHERE parent_id = ?').bind(id).run();
   await env.DB.prepare('DELETE FROM questions WHERE id = ?').bind(id).run();
+  // 题没了，待组卷列表里的那条也得跟着走，否则会留下一条点开后 404 的空记录
+  await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(id).run();
   await Promise.all(keys.map((k) => env.IMAGES.delete(k).catch(() => {})));
 }
 
@@ -1351,8 +1353,9 @@ async function handleApi(
        FROM questions q
        LEFT JOIN submissions s ON s.id = q.submission_id
        LEFT JOIN lessons l ON l.id = s.lesson_id
-       LEFT JOIN units u ON u.id = l.unit_id
-       LEFT JOIN textbooks t ON t.id = u.textbook_id
+       -- 组卷可能只挂了单元（没选课文），单元要从 submissions.unit_id 兜底
+       LEFT JOIN units u ON u.id = COALESCE(l.unit_id, s.unit_id)
+       LEFT JOIN textbooks t ON t.id = COALESCE(u.textbook_id, s.textbook_id)
        WHERE 1=1`;
     const binds: any[] = [];
     const qLesson = (url.searchParams.get('lesson') || '').trim();
@@ -1364,11 +1367,11 @@ async function handleApi(
       sql += ' AND s.lesson_id = ?';
       binds.push(qLesson);
     } else if (qUnit) {
-      sql += ' AND l.unit_id = ?';
+      sql += ' AND u.id = ?';
       binds.push(qUnit);
     } else if (qTb) {
       // 同 submissions 列表：按教材筛时把未归类的也带上，否则会凭空少一批错题
-      sql += ' AND (u.textbook_id = ? OR s.lesson_id IS NULL)';
+      sql += ' AND (u.textbook_id = ? OR (s.lesson_id IS NULL AND s.unit_id IS NULL))';
       binds.push(qTb);
     }
     sql += ' ORDER BY s.created_at DESC, q.seq ASC';
@@ -1399,22 +1402,90 @@ async function handleApi(
     return json({ ok: true, deleted: ids.length });
   }
 
+  /* -------------------------------------------------- 待组卷题目（纸篓） */
+  // 「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷。
+  // 加到队列里只是排队，不会立刻调模型，所以随时可以加、可以反悔。
+  if (p === '/paper-queue' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      `SELECT pq.id AS queue_id, pq.created_at AS queued_at, q.*,
+              s.created_at AS sub_created_at, s.lesson_id AS lesson_id,
+              l.name AS lesson_name, u.id AS unit_id, u.name AS unit_name,
+              t.id AS textbook_id, t.name AS textbook_name
+         FROM paper_queue pq
+         JOIN questions q ON q.id = pq.question_id
+         LEFT JOIN submissions s ON s.id = q.submission_id
+         LEFT JOIN lessons l ON l.id = s.lesson_id
+         LEFT JOIN units u ON u.id = l.unit_id
+         LEFT JOIN textbooks t ON t.id = u.textbook_id
+        ORDER BY pq.created_at ASC, pq.id ASC`,
+    ).all<any>();
+    return json({ items: rows.results || [] });
+  }
+
+  if (p === '/paper-queue' && method === 'POST') {
+    const body = await req.json<any>().catch(() => ({}));
+    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
+    if (!ids.length) throw new HttpError(400, '先勾选要加入的题目');
+    let added = 0;
+    for (const qid of ids) {
+      const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(String(qid)).first<any>();
+      if (!q) continue;
+      // UNIQUE(question_id)：同一道题反复加也只排一次
+      const r = await env.DB.prepare('INSERT OR IGNORE INTO paper_queue (id, question_id, created_at) VALUES (?,?,?)')
+        .bind(uuid(), String(qid), now())
+        .run();
+      if (Number(r?.meta?.changes || 0) > 0) added += 1;
+    }
+    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_queue').first<any>();
+    return json({ ok: true, added, skipped: ids.length - added, total: Number(cnt?.c || 0) });
+  }
+
+  // 移出待组卷：按题目 id 删；body.all = true 则清空
+  if (p === '/paper-queue' && method === 'DELETE') {
+    const body = await req.json<any>().catch(() => ({}));
+    if (body.all) {
+      const r = await env.DB.prepare('DELETE FROM paper_queue').run();
+      return json({ ok: true, removed: Number(r?.meta?.changes || 0) });
+    }
+    const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
+    if (!ids.length) throw new HttpError(400, '没有收到要移出的题目');
+    let removed = 0;
+    for (const qid of ids) {
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(String(qid)).run();
+      removed += Number(r?.meta?.changes || 0);
+    }
+    return json({ ok: true, removed });
+  }
+
   /* ------------------------------------------------------------ 组卷 */
-  // 列出历史卷子
+  // 列出历史卷子（组卷板块 + 作业列表都靠它）
   if (p === '/papers' && method === 'GET') {
     const rows = await env.DB.prepare(
-      `SELECT p.*, (SELECT COUNT(*) FROM paper_items i WHERE i.paper_id = p.id) AS item_count
-       FROM papers p ORDER BY p.created_at DESC LIMIT 50`,
+      `SELECT p.*, (SELECT COUNT(*) FROM paper_items i WHERE i.paper_id = p.id) AS item_count,
+              t.name AS textbook_name, u.name AS unit_name, l.name AS lesson_name,
+              s.status AS sub_status, s.id AS sub_id
+         FROM papers p
+         LEFT JOIN textbooks t ON t.id = p.textbook_id
+         LEFT JOIN units u ON u.id = p.unit_id
+         LEFT JOIN lessons l ON l.id = p.lesson_id
+         LEFT JOIN submissions s ON s.id = p.submission_id
+        ORDER BY p.created_at DESC LIMIT 50`,
     ).all<any>();
     return json({ papers: rows.results || [] });
   }
 
-  // 组卷：一次 LLM 调用把所有错题的类似题都出出来（分多次调用会撞网关超时）
+  // 组卷：两种方式
+  //   mode=original → 直接把勾选的母题原题拼成一张卷（不调模型，秒出）
+  //   mode=variant  → 每道母题举一反三出 per 道类似题（一次 LLM 调用，分多次会撞网关超时），
+  //                   可选 include_original 把原题也排在它的类似题前面
   if (p === '/papers' && method === 'POST') {
     const body = await req.json<any>().catch(() => ({}));
     const ids: string[] = Array.isArray(body.question_ids) ? body.question_ids : [];
-    if (!ids.length) throw new HttpError(400, '先勾选要做卷的题目');
-    const per = Math.min(Math.max(Number(body.per) || 2, 1), 5);
+    if (!ids.length) throw new HttpError(400, '先勾选要组卷的母题');
+    const mode: 'original' | 'variant' = body.mode === 'original' ? 'original' : 'variant';
+    const per = Math.min(Math.max(Number(body.per) || 1, 1), 5);
+    const withOriginal =
+      mode === 'variant' && !(body.include_original === false || body.include_original === 0 || body.include_original === '0');
     const ordered = body.ordered === false || body.ordered === 0 ? 0 : 1;
     const s = await getSettings(env);
 
@@ -1424,72 +1495,142 @@ async function handleApi(
       if (q) qs.push(q);
     }
     if (!qs.length) throw new HttpError(404, '这些题目找不到了，刷新一下再试');
-    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
+    if (qs.length > 12) throw new HttpError(400, `一次最多选 12 道母题组卷（当前选了 ${qs.length} 道），分两卷做效果更好。`);
 
-    const text = await llm(
-      env,
-      paperSystemPrompt(s.grade),
-      paperUserPrompt(
-        qs.map((q, i) => ({
-          index: i + 1,
-          no: String(q.no ?? i + 1),
-          stem: String(q.stem || ''),
-          correctAnswer: String(q.correct_answer || ''),
-          knowledge: String(q.knowledge || ''),
-          errorReason: String(q.error_reason || ''),
-        })),
-        per,
-      ),
-      { temperature: 0.8, maxTokens: 6000, text: true, thinking: (s.thinking_mode as any) || 'fast' },
-    );
-
-    let parsed: any;
-    try {
-      parsed = extractJson(text);
-    } catch {
-      throw new HttpError(502, `老师没出好题：${text.slice(0, 200)}`);
+    // 归属：教材必选，单元 / 课文可选（没选课文时单元也要落到 papers 上，否则会被归到「未指定单元」）
+    const tbId = String(body.textbook_id || '').trim();
+    if (!tbId) throw new HttpError(400, '先选这张卷子属于哪本教材');
+    const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ?').bind(tbId).first<any>();
+    if (!tb) throw new HttpError(400, '所选教材不存在');
+    let lessonId: string | null = String(body.lesson_id || '').trim() || null;
+    let unitId: string | null = String(body.unit_id || '').trim() || null;
+    if (lessonId) {
+      const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+      if (!ls) throw new HttpError(400, '所选课文不存在');
+      if (!unitId) unitId = ls.unit_id || null;
+    } else if (unitId) {
+      const un = await env.DB.prepare('SELECT id, textbook_id FROM units WHERE id = ?').bind(unitId).first<any>();
+      if (!un) throw new HttpError(400, '所选单元不存在');
+      if (String(un.textbook_id || '') !== tbId) throw new HttpError(400, '所选单元不属于这本教材');
     }
-    const rawItems: any[] = Array.isArray(parsed?.items) ? parsed.items : [];
-    if (!rawItems.length) throw new HttpError(502, '一道题都没出出来，再点一次「组卷」试试。');
+
+    const rows: any[] = [];
+    if (mode === 'original') {
+      // 只用原题：题干 → 答案直接用批改时的正确答案，不用等模型
+      qs.forEach((q, i) => {
+        rows.push({
+          srcId: q.id,
+          srcNo: String(q.no ?? i + 1),
+          stem: String(q.stem || ''),
+          answer: String(q.correct_answer ?? ''),
+          solution: String(q.solution ?? ''),
+          difficulty: '原题',
+          knowledge: String(q.knowledge || ''),
+        });
+      });
+    } else {
+      const expected = qs.length * per + (withOriginal ? qs.length : 0);
+      if (expected > 60) {
+        throw new HttpError(
+          400,
+          `这次会出 ${expected} 道题，太多了（一张卷最多 60 道）。少选几道母题，或把每道出的数量调小一点。`,
+        );
+      }
+      const text = await llm(
+        env,
+        paperSystemPrompt(s.grade),
+        paperUserPrompt(
+          qs.map((q, i) => ({
+            index: i + 1,
+            no: String(q.no ?? i + 1),
+            stem: String(q.stem || ''),
+            correctAnswer: String(q.correct_answer || ''),
+            knowledge: String(q.knowledge || ''),
+            errorReason: String(q.error_reason || ''),
+          })),
+          per,
+        ),
+        {
+          temperature: 0.8,
+          maxTokens: Math.min(8000, 1500 + qs.length * per * 140),
+          text: true,
+          thinking: (s.thinking_mode as any) || 'fast',
+        },
+      );
+
+      let parsed: any;
+      try {
+        parsed = extractJson(text);
+      } catch {
+        throw new HttpError(502, `老师没出好题：${text.slice(0, 200)}`);
+      }
+      const rawItems: any[] = Array.isArray(parsed?.items) ? parsed.items : [];
+      if (!rawItems.length) throw new HttpError(502, '一道题都没出出来，再点一次「组卷」试试。');
+
+      // 按 source_index 归拢；认不出来的丢进最后一组，保证出题结果不丢题
+      const buckets = new Map<number, any[]>();
+      rawItems.forEach((it) => {
+        const idx = Number(it.source_index);
+        const key = Number.isFinite(idx) && idx >= 1 && idx <= qs.length ? idx : qs.length;
+        if (!buckets.has(key)) buckets.set(key, []);
+        buckets.get(key)!.push(it);
+      });
+
+      for (let i = 1; i <= qs.length; i++) {
+        const src = qs[i - 1];
+        const srcNo = String(src.no ?? i);
+        // 带上原题：原题排在它自己的类似题前面，孩子先过一遍原题再练变式
+        if (withOriginal) {
+          rows.push({
+            srcId: src.id,
+            srcNo,
+            stem: String(src.stem || ''),
+            answer: String(src.correct_answer ?? ''),
+            solution: String(src.solution ?? ''),
+            difficulty: '原题',
+            knowledge: String(src.knowledge || ''),
+          });
+        }
+        for (const it of buckets.get(i) || []) {
+          rows.push({
+            srcId: src.id,
+            srcNo,
+            stem: String(it.stem || ''),
+            answer: String(it.answer ?? ''),
+            solution: String(it.solution ?? ''),
+            difficulty: String(it.difficulty || '同等'),
+            knowledge: String(it.knowledge || src.knowledge || ''),
+          });
+        }
+      }
+    }
+    if (!rows.length) throw new HttpError(502, '一道题都没出出来，再点一次「组卷」试试。');
+    if (ordered === 0) shuffleInPlace(rows);
 
     const nowIso = now();
     const paperId = uuid();
     const d = new Date();
+    const md = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const title =
-      String(body.title || '').trim() ||
-      `错题练习卷 ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      String(body.title || '').trim() || (mode === 'original' ? `原题练习卷 ${md}` : `练习卷 ${md}`);
     await env.DB.prepare(
-      `INSERT INTO papers (id, title, ordered, status, per_question, created_at, updated_at)
-       VALUES (?, ?, ?, 'draft', ?, ?, ?)`,
+      `INSERT INTO papers (id, title, ordered, status, mode, include_original, per_question,
+                           textbook_id, unit_id, lesson_id, created_at, updated_at)
+       VALUES (?, ?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(paperId, title.slice(0, 60), ordered, per, nowIso, nowIso)
+      .bind(paperId, title.slice(0, 60), ordered, mode, withOriginal ? 1 : 0, per, tbId, unitId, lessonId, nowIso, nowIso)
       .run();
 
-    // 按 source_index 归拢；认不出来的丢进最后一组，保证出题结果不丢题
-    const buckets = new Map<number, any[]>();
-    rawItems.forEach((it) => {
-      const idx = Number(it.source_index);
-      const key = Number.isFinite(idx) && idx >= 1 && idx <= qs.length ? idx : qs.length;
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key)!.push(it);
-    });
-
-    const rows: any[] = [];
-    for (let i = 1; i <= qs.length; i++) {
-      const src = qs[i - 1];
-      for (const it of buckets.get(i) || []) {
-        rows.push({
-          srcId: src.id,
-          srcNo: String(src.no ?? i),
-          stem: String(it.stem || ''),
-          answer: String(it.answer ?? ''),
-          solution: String(it.solution ?? ''),
-          difficulty: String(it.difficulty || '同等'),
-          knowledge: String(it.knowledge || src.knowledge || ''),
-        });
-      }
-    }
-    if (ordered === 0) shuffleInPlace(rows);
+    // 卷子本质也是一份作业：立刻建一条 status=pending（未作答）的记录，
+    // 这样它同时出现在「组卷」板块和作业列表里，打印做完直接拍照交就能批改。
+    const subId = uuid();
+    await env.DB.prepare(
+      `INSERT INTO submissions (id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
+       VALUES (?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
+    )
+      .bind(subId, lessonId, unitId, tbId, paperId, nowIso)
+      .run();
+    await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ?').bind(subId, paperId).run();
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
@@ -1500,7 +1641,16 @@ async function handleApi(
         .bind(uuid(), paperId, i, r.stem, r.answer, r.solution, r.difficulty, r.knowledge, r.srcId, r.srcNo, nowIso)
         .run();
     }
-    return json({ id: paperId, title, count: rows.length });
+
+    // 组完就把用掉的母题从「待组卷」里移走（默认移除，body.keep_queue=true 可保留）
+    let removedFromQueue = 0;
+    if (!body.keep_queue) {
+      for (const q of qs) {
+        const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(q.id).run();
+        removedFromQueue += Number(r?.meta?.changes || 0);
+      }
+    }
+    return json({ id: paperId, title, count: rows.length, submission_id: subId, removed_from_queue: removedFromQueue });
   }
 
   if (p.startsWith('/papers/') && method === 'GET') {
@@ -1521,8 +1671,10 @@ async function handleApi(
     const ls = paper?.lesson_id
       ? await env.DB.prepare('SELECT id, name, unit_id FROM lessons WHERE id = ?').bind(paper.lesson_id).first<any>()
       : null;
-    const un = ls?.unit_id
-      ? await env.DB.prepare('SELECT id, name FROM units WHERE id = ?').bind(ls.unit_id).first<any>()
+    // 选了单元但没选课文时，单元直接存在 papers.unit_id 上
+    const unId = ls?.unit_id || paper?.unit_id || '';
+    const un = unId
+      ? await env.DB.prepare('SELECT id, name FROM units WHERE id = ?').bind(unId).first<any>()
       : null;
     return json({
       paper,
@@ -1589,9 +1741,11 @@ async function handleApi(
       const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ?').bind(tbId).first<any>();
       if (!tb) throw new HttpError(400, '所选教材不存在');
       let lessonId: string | null = String(body.lesson_id || '').trim() || null;
+      let unitId: string | null = String(body.unit_id || '').trim() || null;
       if (lessonId) {
-        const ls = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
         if (!ls) throw new HttpError(400, '所选课文不存在');
+        if (!unitId) unitId = ls.unit_id || null;
       } else {
         lessonId = null;
       }
@@ -1604,20 +1758,20 @@ async function handleApi(
       if (!subId) {
         subId = uuid();
         await env.DB.prepare(
-          `INSERT INTO submissions (id, kind, lesson_id, textbook_id, paper_id, status, created_at)
-           VALUES (?, 'paper', ?, ?, ?, 'pending', ?)`,
+          `INSERT INTO submissions (id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
+           VALUES (?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
         )
-          .bind(subId, lessonId, tbId, pid, now())
+          .bind(subId, lessonId, unitId, tbId, pid, now())
           .run();
       } else {
-        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, textbook_id = ? WHERE id = ?')
-          .bind(lessonId, tbId, subId)
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ?')
+          .bind(lessonId, unitId, tbId, subId)
           .run();
       }
       await env.DB.prepare(
-        'UPDATE papers SET status = ?, title = ?, textbook_id = ?, lesson_id = ?, submission_id = ?, updated_at = ? WHERE id = ?',
+        'UPDATE papers SET status = ?, title = ?, textbook_id = ?, unit_id = ?, lesson_id = ?, submission_id = ?, updated_at = ? WHERE id = ?',
       )
-        .bind('final', title ? title.slice(0, 60) : paper.title, tbId, lessonId, subId, now(), pid)
+        .bind('final', title ? title.slice(0, 60) : paper.title, tbId, unitId, lessonId, subId, now(), pid)
         .run();
       return json({ ok: true, submission_id: subId });
     }
@@ -1628,20 +1782,22 @@ async function handleApi(
         .bind(title.slice(0, 60), now(), pid)
         .run();
     }
-    if ('textbook_id' in body || 'lesson_id' in body) {
+    if ('textbook_id' in body || 'lesson_id' in body || 'unit_id' in body) {
       const tbId = String(body.textbook_id || paper.textbook_id || '').trim();
       if (!tbId) throw new HttpError(400, '这本卷子还没选教材');
       let lessonId: string | null = String(body.lesson_id || '').trim() || null;
+      let unitId: string | null = String(body.unit_id || '').trim() || null;
       if (lessonId) {
-        const ls = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
         if (!ls) throw new HttpError(400, '所选课文不存在');
+        if (!unitId) unitId = ls.unit_id || null;
       }
-      await env.DB.prepare('UPDATE papers SET textbook_id = ?, lesson_id = ?, updated_at = ? WHERE id = ?')
-        .bind(tbId, lessonId, now(), pid)
+      await env.DB.prepare('UPDATE papers SET textbook_id = ?, unit_id = ?, lesson_id = ?, updated_at = ? WHERE id = ?')
+        .bind(tbId, unitId, lessonId, now(), pid)
         .run();
       if (paper.submission_id) {
-        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, textbook_id = ? WHERE id = ?')
-          .bind(lessonId, tbId, paper.submission_id)
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ?')
+          .bind(lessonId, unitId, tbId, paper.submission_id)
           .run();
       }
     }
@@ -1711,13 +1867,20 @@ async function handleApi(
     const unitId = (url.searchParams.get('unit') || '').trim();
     const tbId = (url.searchParams.get('textbook') || '').trim();
     // 组卷确认后生成的 kind='paper' 条目也算作业（未作答时 status='pending'）
-    let sql = `SELECT s.*, l.name AS lesson_name, l.unit_id AS unit_id,
-        u.name AS unit_name, u.textbook_id AS textbook_id, t.name AS textbook_name,
+    // 归属可能有两条路：作业/课文 → lessons.unit_id；组卷只选了单元没选课文时 → submissions.unit_id。
+    // 用 eff_* 统一算出来，前端不用关心它属于哪种情况。
+    let sql = `SELECT s.*, l.name AS lesson_name,
+        COALESCE(l.unit_id, s.unit_id) AS eff_unit_id,
+        COALESCE(u.name, su.name) AS eff_unit_name,
+        COALESCE(u.textbook_id, su.textbook_id, s.textbook_id) AS eff_textbook_id,
+        COALESCE(t.name, st.name) AS eff_textbook_name,
         pt.name AS paper_textbook_name, pp.title AS paper_title
        FROM submissions s
        LEFT JOIN lessons l ON l.id = s.lesson_id
        LEFT JOIN units u ON u.id = l.unit_id
        LEFT JOIN textbooks t ON t.id = u.textbook_id
+       LEFT JOIN units su ON su.id = s.unit_id
+       LEFT JOIN textbooks st ON st.id = COALESCE(s.textbook_id, su.textbook_id)
        LEFT JOIN textbooks pt ON pt.id = s.textbook_id
        LEFT JOIN papers pp ON pp.id = s.paper_id
        WHERE s.kind IN ('homework','paper')`;
@@ -1729,14 +1892,15 @@ async function handleApi(
       sql += ' AND s.lesson_id = ?';
       binds.push(lessonId);
     } else if (unitId) {
-      sql += ' AND l.unit_id = ?';
+      sql += ' AND COALESCE(l.unit_id, s.unit_id) = ?';
       binds.push(unitId);
     } else if (tbId) {
       // 关键：未归类的作业 lesson_id 是 NULL，LEFT JOIN 后 u.textbook_id 也是 NULL，
       // 只写 u.textbook_id = ? 会把它们全过滤掉，用户会以为作业丢了。
       // 按教材筛选时应当同时带上未归类的；组卷条目则可能只归到了教材（lesson_id 为空）。
-      sql += ' AND (u.textbook_id = ? OR (s.lesson_id IS NULL AND (s.textbook_id IS NULL OR s.textbook_id = ?)))';
-      binds.push(tbId, tbId);
+      sql += ` AND (u.textbook_id = ? OR su.textbook_id = ? OR s.textbook_id = ?
+                   OR (s.lesson_id IS NULL AND s.unit_id IS NULL AND s.textbook_id IS NULL))`;
+      binds.push(tbId, tbId, tbId);
     }
     sql += ' ORDER BY s.created_at DESC LIMIT 200';
     const rows = await env.DB.prepare(sql).bind(...binds).all<any>();
@@ -1766,6 +1930,11 @@ async function handleApi(
       }
       out.push({
         ...s,
+        // 统一成前端一直用的字段名（作业走课文、组卷走 submissions.unit_id，两条路都折算到这里）
+        unit_id: s.eff_unit_id || '',
+        unit_name: s.eff_unit_name || '',
+        textbook_id: s.eff_textbook_id || s.textbook_id || '',
+        textbook_name: s.eff_textbook_name || '',
         total,
         wrong: list.filter((q) => Number(q.is_correct) === 0).length,
         passed,
@@ -2250,6 +2419,9 @@ async function handleApi(
     await env.DB.prepare('UPDATE submissions SET lesson_id = NULL WHERE lesson_id IN (SELECT id FROM lessons WHERE unit_id = ?)')
       .bind(row.id)
       .run();
+    // 只挂了单元、没挂课文的组卷条目，单元没了也要跟着清空
+    await env.DB.prepare('UPDATE submissions SET unit_id = NULL WHERE unit_id = ?').bind(row.id).run();
+    await env.DB.prepare('UPDATE papers SET unit_id = NULL WHERE unit_id = ?').bind(row.id).run();
     await env.DB.prepare('DELETE FROM lessons WHERE unit_id = ?').bind(row.id).run();
     await env.DB.prepare('DELETE FROM units WHERE id = ?').bind(row.id).run();
     return json({ ok: true });

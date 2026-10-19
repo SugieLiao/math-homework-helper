@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   kind        TEXT NOT NULL,          -- homework | variant | paper
   parent_id   TEXT,                   -- kind=variant 时的母题 id
   lesson_id   TEXT,                   -- 归属课文（units/lessons），用于按单元复习
+  unit_id     TEXT,                   -- 归属单元（组卷时选了单元但没选课文时用）
   textbook_id TEXT,                   -- 归属教材（kind=paper 且没选到具体课文时用；教材必选，课文可选）
   paper_id    TEXT,                   -- kind=paper 时对应的卷子 id
   image_key   TEXT,                   -- R2 原图（卷子未作答时为 NULL）
@@ -133,15 +134,27 @@ CREATE TABLE IF NOT EXISTS variants (
 
 CREATE INDEX IF NOT EXISTS idx_variants_parent ON variants (parent_id);
 
--- 组卷：从错题本里选若干道错题，每道出 N 道类似题，凑成一张练习卷
+-- 待组卷题目：在「作业详情」「错题本」里勾选后先加到这里，攒够了再统一组卷
+CREATE TABLE IF NOT EXISTS paper_queue (
+  id          TEXT PRIMARY KEY,
+  question_id TEXT NOT NULL UNIQUE,   -- 同一道题只排一次
+  created_at  TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_queue_created ON paper_queue (created_at);
+
+-- 组卷：从待组卷题目里挑若干道母题，原题直接成卷或每道出 N 道类似题
 CREATE TABLE IF NOT EXISTS papers (
   id          TEXT PRIMARY KEY,
-  title       TEXT NOT NULL,          -- 卷子标题，如「错题练习卷 10-18」
-  ordered     INTEGER DEFAULT 1,      -- 1 = 按错题顺序组卷；0 = 乱序
+  title       TEXT NOT NULL,          -- 卷子标题，如「练习卷 10-18」
+  ordered     INTEGER DEFAULT 1,      -- 1 = 按母题顺序组卷；0 = 乱序
   status      TEXT DEFAULT 'draft',   -- draft = 还在编辑；final = 已确认组卷
+  mode        TEXT DEFAULT 'variant', -- original = 只用原题；variant = 举一反三
+  include_original INTEGER DEFAULT 0, -- variant 模式下是否把原题也放进卷子
   per_question INTEGER DEFAULT 2,     -- 每道母题出几道类似题
-  textbook_id TEXT,                   -- 确认组卷时选的教材（必选）
-  lesson_id   TEXT,                   -- 确认组卷时选的课文（可选；没选就是只归到教材）
+  textbook_id TEXT,                   -- 组卷时选的教材（必选）
+  unit_id     TEXT,                   -- 组卷时选的单元（可选）
+  lesson_id   TEXT,                   -- 组卷时选的课文（可选；没选就是只归到教材/单元）
   submission_id TEXT,                 -- 确认组卷后生成的作业条目 id（卷子本质上也是一份作业）
   created_at  TEXT,
   updated_at  TEXT
