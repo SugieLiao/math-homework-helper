@@ -122,6 +122,7 @@ document.getElementById('up-tb').onchange = async (e) => {
 };
 document.getElementById('up-go').onclick = () => {
   pendingLessonId = document.getElementById('up-lesson').value || '';
+  cameraShots = []; // 每次新交作业都从第一页开始
   const kind = pendingKind;
   closeUploadModal();
   // 必须在用户手势里同步触发，否则 iOS 会拦住 file input
@@ -282,11 +283,12 @@ async function home(opts = {}) {
       ? `<img class="sub-thumb zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" />`
       : `<div class="sub-thumb sub-thumb-ph">📄</div>`;
     const title = isPaper ? `📝 ${esc(s.paper_title || '练习卷')}` : fmtDate(s.created_at);
+    const pageTag = Number(s.pages) > 1 ? ` · ${s.pages} 页` : '';
     const meta = isPaper
-      ? `${fmtDate(s.created_at)} · ${s.total} 题`
+      ? `${fmtDate(s.created_at)} · ${s.total} 题${pageTag}`
       : s.state === 'pending'
-        ? `${s.total} 题（还没做）`
-        : `${s.total} 题 · 错 ${s.wrong} 题 · 过关 ${s.passed} 题`;
+        ? `${s.total} 题（还没做）${pageTag}`
+        : `${s.total} 题${pageTag} · 错 ${s.wrong} 题 · 过关 ${s.passed} 题`;
     return `
     <div class="sub-item" style="border-bottom:1px solid var(--line)">
       <input type="checkbox" class="sub-check" data-id="${s.id}" style="width:20px;height:20px;flex:0 0 auto" />
@@ -379,6 +381,7 @@ async function submission(id) {
   }
   const s = data.submission;
   const qs = data.questions || [];
+  const pages = (data.pages || []).filter((p) => p.image_key);
   let units = [];
   try {
     const t = await api.get('/textbook');
@@ -391,10 +394,18 @@ async function submission(id) {
         <h2 style="margin:0">${fmtDate(s.created_at)} 的作业</h2>
         <span class="spacer"></span>
         <span class="badge info">${qs.length} 题</span>
+        ${pages.length > 1 ? `<span class="badge gray">${pages.length} 页</span>` : ''}
         <span class="badge ${qs.filter((q) => !Number(q.is_correct)).length ? 'wrong' : 'pass'}">
           错 ${qs.filter((q) => !Number(q.is_correct)).length} 题</span>
       </div>
-      ${s.image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" style="max-height:420px" />` : ''}
+      ${pages
+        .map(
+          (p, i) =>
+            `<img class="ans-img zoomable" src="${api.imgUrl(p.image_key)}" alt="作业原图 第${i + 1}页${
+              pages.length > 1 ? `（共${pages.length}页）` : ''
+            }" style="max-height:420px" />`,
+        )
+        .join('')}
       ${
         s.paper_id
           ? `<div class="row wrap" style="margin-top:8px"><span class="tag">组卷</span>
@@ -1212,27 +1223,41 @@ async function renderPaperPrint(id) {
 const fileInput = document.getElementById('file-homework');
 const fileAlbum = document.getElementById('file-homework-album');
 
-async function handleHomeworkFile(input) {
-  const file = input.files && input.files[0];
-  input.value = '';
-  if (!file) return;
+/**
+ * 把（一张或多张）照片当同一份作业上传：第一张建作业，后面几张追加成第 2、3… 页，
+ * 全部到齐后只批改一次。多页作业在详情页按页显示。
+ */
+async function uploadHomeworkFiles(files) {
+  const list0 = Array.from(files || []).filter(Boolean);
+  if (!list0.length) return;
+  if (list0.length > 8) return toast('一次最多 8 页，多了分成两次交吧', 6000);
   let subId = null;
+  const blobs = []; // 每页压缩后的图，裁作答图时按页取
   try {
-    busy(isHeicFile(file) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
-    const small = await compressImage(file);
-    // 归类选的是弹窗里那一课，不是首页筛选
-    const lessonId = pendingLessonId || '';
-    const up = await api.upload('/homework/upload', small, lessonId ? { lesson_id: lessonId } : {});
-    subId = up.id;
-    busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
+    for (let i = 0; i < list0.length; i++) {
+      const prefix = list0.length > 1 ? `第 ${i + 1}/${list0.length} 页 · ` : '';
+      busy(isHeicFile(list0[i]) ? `${prefix}HEIC 照片正在转成 JPG…` : `${prefix}上传中…`);
+      const small = await compressImage(list0[i]);
+      blobs.push(small);
+      // 归类选的是弹窗里那一课，不是首页筛选；第二页起带 submission_id 追加到同一份作业
+      const extra = { lesson_id: pendingLessonId || '' };
+      if (subId) extra.submission_id = subId;
+      const up = await api.upload('/homework/upload', small, extra);
+      subId = up.id;
+    }
+    busy(
+      list0.length > 1
+        ? `老师正在批改 ${list0.length} 页…（大约 30～70 秒，别关页面）`
+        : '老师正在批改…（快速模式约 15～40 秒，别关页面）',
+    );
     // 批改是长请求，加硬超时，避免界面无限转圈
-    const graded = await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
-    // 裁剪每题的作答图（用转码后的 JPEG 裁，HEIC 浏览器解不开）
+    const graded = await withTimeout(api.post(`/homework/${subId}/grade`, {}), 240000);
+    // 裁剪每题的作答图（用转码后的 JPEG 裁，HEIC 浏览器解不开）；多页要按题目所在页裁
     const list = graded.questions || [];
-    for (let i = 0; i < list.length; i++) {
-      const q = list[i];
+    for (const q of list) {
       if (!q.band) continue;
-      const blob = await cropBand(small, q.band);
+      const idx = Math.max(0, Math.min(blobs.length - 1, (Number(q.page) || 1) - 1));
+      const blob = await cropBand(blobs[idx] || blobs[0], q.band);
       if (blob) {
         try {
           await api.upload(`/questions/${q.id}/answer-image`, blob, {});
@@ -1240,8 +1265,8 @@ async function handleHomeworkFile(input) {
       }
     }
     idle();
-    toast(`批改完成，共 ${list.length} 题`);
-    location.hash = `#/s/${up.id}`;
+    toast(`批改完成，共 ${list.length} 题${list0.length > 1 ? `（${list0.length} 页）` : ''}`);
+    location.hash = `#/s/${subId}`;
   } catch (e) {
     idle();
     toast(e.message, 8000);
@@ -1250,7 +1275,57 @@ async function handleHomeworkFile(input) {
   }
 }
 
-fileInput.addEventListener('change', () => handleHomeworkFile(fileInput));
+/* 拍照：一次只能拍一张，所以逐张问「还有下一页吗」。点「再拍一页」是在用户手势里
+   同步调起相机的，不会像 await 之后调 click() 那样被 iOS 拦掉。 */
+let cameraShots = [];
+
+function askMorePage(count) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `
+      <div class="modal-card">
+        <h3>已经拍了 ${count} 张</h3>
+        <p class="small muted" style="margin-top:-6px">这份作业还有下一页吗？多张会合并成同一份作业一起批改。</p>
+        <div class="row-end">
+          <button class="btn" id="mp-more">📷 再拍一页</button>
+          <button class="btn primary" id="mp-done">✔ 就这些，开始批改</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const close = (v) => {
+      wrap.remove();
+      resolve(v);
+    };
+    wrap.querySelector('#mp-more').onclick = () => {
+      close(true);
+      fileInput.click(); // 仍在这次点击的用户手势里
+    };
+    wrap.querySelector('#mp-done').onclick = () => close(false);
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) close(false);
+    });
+  });
+}
+
+fileInput.addEventListener('change', async () => {
+  const f = fileInput.files && fileInput.files[0];
+  fileInput.value = '';
+  if (!f) return;
+  cameraShots.push(f);
+  const more = await askMorePage(cameraShots.length);
+  if (more) return; // 等用户拍下一张
+  const shots = cameraShots;
+  cameraShots = [];
+  await uploadHomeworkFiles(shots);
+});
+
+fileAlbum.addEventListener('change', async () => {
+  const files = Array.from(fileAlbum.files || []);
+  fileAlbum.value = '';
+  if (!files.length) return;
+  await uploadHomeworkFiles(files);
+});
 
 /* 组卷的答卷：拍做好的卷子交回来，挂到确认组卷时生成的那条作业记录上再批改 */
 const filePaper = document.getElementById('file-paper');
@@ -1283,7 +1358,6 @@ async function handlePaperFile(input) {
 
 filePaper.addEventListener('change', () => handlePaperFile(filePaper));
 filePaperAlbum.addEventListener('change', () => handlePaperFile(filePaperAlbum));
-fileAlbum.addEventListener('change', () => handleHomeworkFile(fileAlbum));
 
 /* ------------------------------------------------ 路由 */
 async function route() {

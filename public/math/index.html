@@ -43,7 +43,7 @@
     <div class="field">
       <label>这次作业属于</label>
       <select id="up-lesson"></select>
-      <div class="hint">选了以后这份作业就挂在对应单元/课文下，以后按单元复习一筛就出来。不选也行，批改完再归类。</div>
+      <div class="hint">选了以后这份作业就挂在对应单元/课文下，以后按单元复习一筛就出来。不选也行，批改完再归类。<br/>作业有几页就传几张：相册可以一次多选，拍照会问你要不要「再拍一页」，多张算同一份作业。</div>
     </div>
     <div class="row-end">
       <button class="btn" id="up-cancel">取消</button>
@@ -52,11 +52,11 @@
   </div>
 </div>
 
-<!-- 拍照（直接调起摄像头） -->
+<!-- 拍照（直接调起摄像头）。多页作业逐张拍，所以这里不设 multiple -->
 <input type="file" id="file-homework" accept="image/*" capture="environment" class="hidden" />
 <input type="file" id="file-variant" accept="image/*" capture="environment" class="hidden" />
-<!-- 从相册选（不带 capture，系统才会弹出「拍照 / 照片图库 / 浏览」选项） -->
-<input type="file" id="file-homework-album" accept="image/*" class="hidden" />
+<!-- 从相册选（不带 capture，系统才会弹出「拍照 / 照片图库 / 浏览」选项）。multiple = 一次选多页 -->
+<input type="file" id="file-homework-album" accept="image/*" multiple class="hidden" />
 <input type="file" id="file-variant-album" accept="image/*" class="hidden" />
 <!-- 组卷的答卷（拍做好的卷子交回来） -->
 <input type="file" id="file-paper" accept="image/*" capture="environment" class="hidden" />

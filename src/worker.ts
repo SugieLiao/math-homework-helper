@@ -237,6 +237,8 @@ async function getActiveConfig(env: Env, useText: boolean, s?: Settings): Promis
 interface LlmOptions {
   imageBase64?: string;
   imageType?: string;
+  /** 多张图（一份作业有多页时一次全给模型）。传了它就用它，忽略上面的单图字段 */
+  images?: { b64: string; type: string }[];
   temperature?: number;
   maxTokens?: number;
   /** true = 走「文本 / 推理模型」槽位（出题、讲解这类不用看图的活） */
@@ -359,7 +361,13 @@ async function llm(
   if (!key) {
     throw new HttpError(400, '当前模型源没有填 API Key，请到「设置 → 模型源库」里补上。');
   }
-  if (opts.imageBase64 && !canSeeImages(base, model)) {
+  const pics: { b64: string; type: string }[] =
+    opts.images && opts.images.length
+      ? opts.images
+      : opts.imageBase64
+        ? [{ b64: opts.imageBase64, type: opts.imageType || 'image/jpeg' }]
+        : [];
+  if (pics.length && !canSeeImages(base, model)) {
     throw new HttpError(
       400,
       `当前模型源（${model}）看不了照片：这个槽位需要能读图的模型（名字里一般带 v / vision / vl）。请在「模型源库」里启用一个视觉模型源。`,
@@ -367,10 +375,10 @@ async function llm(
   }
 
   const content: any[] = [];
-  if (opts.imageBase64) {
+  for (const p of pics) {
     content.push({
       type: 'image_url',
-      image_url: { url: imageUrlFor(base, opts.imageBase64, opts.imageType) },
+      image_url: { url: imageUrlFor(base, p.b64, p.type) },
     });
   }
   content.push({ type: 'text', text: userText });
@@ -688,6 +696,12 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
     .all<any>();
   const ids = (qs.results || []).map((r) => r.id);
   const keys: string[] = [sub.image_key].filter(Boolean);
+  const pgs = await env.DB.prepare('SELECT image_key FROM submission_pages WHERE submission_id = ?')
+    .bind(id)
+    .all<any>();
+  (pgs.results || []).forEach((r: any) => {
+    if (r.image_key) keys.push(r.image_key);
+  });
   (qs.results || []).forEach((r) => {
     if (r.answer_image_key) keys.push(r.answer_image_key);
   });
@@ -707,6 +721,7 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
       .run();
     await env.DB.prepare('DELETE FROM questions WHERE submission_id = ?').bind(id).run();
   }
+  await env.DB.prepare('DELETE FROM submission_pages WHERE submission_id = ?').bind(id).run();
   // 这是组卷生成的作业条目：连卷子本身一起删掉，否则作业列表里没了、卷子还留着变成孤儿
   if (sub.paper_id) {
     await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ?').bind(sub.paper_id).run();
@@ -724,13 +739,27 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     // 上一次失败后重试：清掉旧标记
     await env.DB.prepare('UPDATE submissions SET error_msg = NULL WHERE id = ?').bind(id).run();
   }
-  const obj = await env.IMAGES.get(sub.image_key);
-  if (!obj) throw new HttpError(404, '图片不存在（可能没上传成功），请重新拍照上传。');
-  const buf = await obj.arrayBuffer();
-  if (buf.byteLength > 9 * 1024 * 1024) {
-    throw new HttpError(413, '这张照片太大了，大模型不接受。请截图或压缩后再传。');
+  // 多页作业：把这门作业的每一页都取出来，一次交给模型
+  const pageRows = await env.DB.prepare(
+    'SELECT image_key FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC',
+  )
+    .bind(id)
+    .all<any>();
+  let pageKeys = (pageRows.results || []).map((r: any) => r.image_key).filter(Boolean);
+  if (!pageKeys.length && sub.image_key) pageKeys = [sub.image_key];
+  if (!pageKeys.length) throw new HttpError(404, '图片不存在（可能没上传成功），请重新拍照上传。');
+
+  const pics: { b64: string; type: string }[] = [];
+  for (const k of pageKeys) {
+    const obj = await env.IMAGES.get(k);
+    if (!obj) continue;
+    const buf = await obj.arrayBuffer();
+    if (buf.byteLength > 9 * 1024 * 1024) {
+      throw new HttpError(413, '这张照片太大了，大模型不接受。请截图或压缩后再传。');
+    }
+    pics.push({ b64: toBase64(buf), type: contentTypeOf(k) });
   }
-  const b64 = toBase64(buf);
+  if (!pics.length) throw new HttpError(404, '图片不存在（可能没上传成功），请重新拍照上传。');
   const s = await getSettings(env);
 
   // 批的是组卷答卷：把原卷题目和正确答案一并给模型当校对依据，判分更稳
@@ -747,11 +776,17 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     }
   }
 
+  if (pics.length > 1) {
+    userPrompt =
+      `这份作业一共 ${pics.length} 张照片，按顺序分别对应第 1 页到第 ${pics.length} 页，请全部批改。` +
+      '每道题都要用 page 字段写明它在第几页（从 1 开始），answer_band 是相对该页的纵向百分比。\n\n' +
+      userPrompt;
+  }
+
   const text = await llm(env, gradeSystemPrompt(s.grade), userPrompt, {
-    imageBase64: b64,
-    imageType: contentTypeOf(sub.image_key),
+    images: pics,
     temperature: 0.1,
-    maxTokens: 4000,
+    maxTokens: Math.min(4000 + (pics.length - 1) * 2000, 9000),
     thinking: (s.thinking_mode as any) || 'fast',
   });
 
@@ -793,8 +828,8 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     await env.DB.prepare(
       `INSERT INTO questions
        (id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
-        error_reason, solution, knowledge, answer_band, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        error_reason, solution, knowledge, page, answer_band, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
       .bind(
         qid,
@@ -808,6 +843,7 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
         String(q.error_reason ?? ''),
         String(q.solution ?? ''),
         String(q.knowledge ?? ''),
+        Math.min(Math.max(Number(q.page) || 1, 1), pics.length),
         band ? JSON.stringify(band) : null,
         now(),
       )
@@ -1078,16 +1114,42 @@ async function handleApi(
       const ok = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
       if (!ok) throw new HttpError(400, '所选课文不存在');
     }
+    const buf = await file.arrayBuffer();
+
+    // 多页作业：带 submission_id 就是往同一份作业上再加一页
+    const appendTo = String(form.get('submission_id') || '').trim();
+    if (appendTo) {
+      const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ?').bind(appendTo).first<any>();
+      if (!sub) throw new HttpError(404, '这份作业不存在，重新拍一次');
+      const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
+        .bind(appendTo)
+        .first<any>();
+      if (Number(cnt?.c || 0) >= 8) throw new HttpError(400, '一份作业最多 8 页，多了分成两次交吧。');
+      const pos = Number(cnt?.c || 0);
+      const key = `page/${appendTo}-${pos}.${ext}`;
+      await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
+      await env.DB.prepare(
+        'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,?,?,?)',
+      )
+        .bind(uuid(), appendTo, pos, key, now())
+        .run();
+      return json({ id: appendTo, image_key: key, pos });
+    }
+
     const id = uuid();
     const key = `orig/${id}.${ext}`;
-    const buf = await file.arrayBuffer();
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
     await env.DB.prepare(
       "INSERT INTO submissions (id, kind, lesson_id, image_key, status, created_at) VALUES (?, 'homework', ?, ?, 'grading', ?)",
     )
       .bind(id, lessonId, key, now())
       .run();
-    return json({ id, image_key: key });
+    await env.DB.prepare(
+      'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)',
+    )
+      .bind(uuid(), id, key, now())
+      .run();
+    return json({ id, image_key: key, pos: 0 });
   }
 
   // 批改（OCR + 判对错 + 分析）
@@ -1479,6 +1541,12 @@ async function handleApi(
     await env.DB.prepare("UPDATE submissions SET image_key = ?, status = 'grading', error_msg = NULL WHERE id = ?")
       .bind(key, subId)
       .run();
+    await env.DB.prepare('DELETE FROM submission_pages WHERE submission_id = ?').bind(subId).run();
+    await env.DB.prepare(
+      'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)',
+    )
+      .bind(uuid(), subId, key, now())
+      .run();
     return json({ id: subId, image_key: key });
   }
 
@@ -1529,6 +1597,9 @@ async function handleApi(
         const m = computeMastery(q, vs.results || []);
         if (m.passed) passed += 1;
       }
+      const pgc = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
+        .bind(s.id)
+        .first<any>();
       // 卷子还没交答案时没有题目，题量按卷子本身的题目数显示
       let total = list.length;
       if (!total && s.paper_id) {
@@ -1543,6 +1614,7 @@ async function handleApi(
         wrong: list.filter((q) => Number(q.is_correct) === 0).length,
         passed,
         paper_title: s.paper_title || '',
+        pages: Number(pgc?.c || 0) || (s.image_key ? 1 : 0),
         // 作答状态按「有没有题目」判定，跟是不是组卷无关：
         // 组卷刚发出去、或任何一份还没做出来的作业，都是 pending（未作答）。
         state:
@@ -1567,7 +1639,13 @@ async function handleApi(
       .all<any>();
     const list = qs.results || [];
     const questions = await Promise.all(list.map((r) => questionWithMastery(env, r)));
-    return json({ submission: sub, questions });
+    // 多页作业：把所有页按顺序返回，详情页要一张张显示
+    const pgs = await env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC')
+      .bind(sub.id)
+      .all<any>();
+    let pages = (pgs.results || []).filter((r: any) => r.image_key);
+    if (!pages.length && sub.image_key) pages = [{ id: 'legacy', submission_id: sub.id, pos: 0, image_key: sub.image_key }];
+    return json({ submission: sub, questions, pages });
   }
 
   const qMatch = /^\/questions\/([a-z0-9]+)$/.exec(p);

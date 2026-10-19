@@ -80,6 +80,17 @@ CREATE TABLE IF NOT EXISTS submissions (
   created_at  TEXT
 );
 
+-- 一份作业的每一页（一次拍多张 = 同一份作业的多页）
+CREATE TABLE IF NOT EXISTS submission_pages (
+  id            TEXT PRIMARY KEY,
+  submission_id TEXT NOT NULL,
+  pos           INTEGER DEFAULT 0,    -- 第几页，从 0 开始
+  image_key     TEXT,                 -- R2 原图
+  created_at    TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_pages_sub ON submission_pages (submission_id);
+
 -- 母题（作业里识别出来的每一道题）
 CREATE TABLE IF NOT EXISTS questions (
   id              TEXT PRIMARY KEY,
@@ -93,6 +104,7 @@ CREATE TABLE IF NOT EXISTS questions (
   error_reason    TEXT,               -- 错因分析
   solution        TEXT,               -- 正确推导过程
   knowledge       TEXT,               -- 知识点
+  page            INTEGER DEFAULT 1,  -- 这道题在第几页照片上（多页作业用）
   answer_band     TEXT,               -- 答案区域纵向百分比 [y1,y2]（供前端裁剪）
   answer_image_key TEXT,              -- 答案区域裁剪图（R2）
   created_at      TEXT
