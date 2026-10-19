@@ -131,7 +131,48 @@ document.getElementById('up-go').onclick = () => {
   document.getElementById(inputId).click();
 };
 
+/* 列表骨架屏：数据没回来时先占位。
+   之前列表区是纯空白，用户分不清「正在加载」还是「这份作业列表本来就空了」。 */
+function listSkeleton(text = '正在加载…', rows = 4) {
+  return `
+    <div class="sk-tip"><span class="sk-spin"></span>${esc(text)}</div>
+    <div class="card" style="padding:0">
+      ${Array.from({ length: rows })
+        .map(
+          () => `
+        <div class="sk-row">
+          <div class="sk-thumb"></div>
+          <div class="sk-body">
+            <div class="sk-line" style="width:56%"></div>
+            <div class="sk-line sm" style="width:38%"></div>
+          </div>
+          <div class="sk-pill"></div>
+        </div>`,
+        )
+        .join('')}
+    </div>`;
+}
+
+/* 首屏骨架：连按钮和筛选框一起占位，避免第一屏只剩几行灰条在跳 */
+function homeSkeleton() {
+  return `
+    <div class="hero">
+      <div class="sk-btn" style="width:132px"></div>
+      <div class="sk-btn" style="width:124px"></div>
+      <div class="sk-btn" style="width:112px"></div>
+      <div class="sk-btn" style="width:96px"></div>
+    </div>
+    <div class="sk-bar"></div>
+    ${listSkeleton('正在加载作业记录…', 4)}`;
+}
+
 async function home(opts = {}) {
+  // 先把加载态放上去：进首页要连拉教材、大纲、作业三个接口，中间不能一片空白
+  // （切教材/课文时旧列表还在，就地换成骨架，用户能看出正在重新查）
+  const oldList = document.getElementById('list');
+  if (oldList) oldList.innerHTML = listSkeleton('正在加载作业记录…', 4);
+  else view.innerHTML = homeSkeleton();
+
   let textbooks = [];
   let units = [];
   try {
@@ -187,7 +228,11 @@ async function home(opts = {}) {
       </select>
     </div>
 
-    <div id="stats" class="stat-grid" style="margin:12px 0"></div>
+    <div id="stats" class="stat-grid" style="margin:12px 0">
+      <div class="stat"><b class="sk-num">–</b><span>累计题目</span></div>
+      <div class="stat"><b class="sk-num">–</b><span>做错</span></div>
+      <div class="stat"><b class="sk-num">–</b><span>已过关</span></div>
+    </div>
     <div class="row wrap" style="margin:12px 0">
       <div class="section-title" style="margin:0">作业记录</div>
       <span class="spacer"></span>
@@ -198,7 +243,7 @@ async function home(opts = {}) {
         <button class="btn sm" id="btn-del-cancel">取消</button>
       </span>
     </div>
-    <div id="list"></div>`;
+    <div id="list">${listSkeleton('正在加载作业记录…')}</div>`;
 
   // 正在看某一课（或「未归类」）时，弹窗里默认就带到那一课
   const preferLesson = lessonFilter && lessonFilter !== '__none' ? lessonFilter : '';
@@ -372,7 +417,7 @@ async function home(opts = {}) {
 
 /* ------------------------------------------------ 作业详情 */
 async function submission(id) {
-  view.innerHTML = `<div class="empty">加载中…</div>`;
+  view.innerHTML = listSkeleton('正在打开这份作业…', 3);
   let data;
   try {
     data = await api.get(`/submissions/${id}`);
@@ -788,7 +833,7 @@ async function deletePageFlow(subId, pageId, pageNo, qCount) {
 /* ------------------------------------------------ 错题本 */
 /* 错题本：按「教材 → 单元 → 课文」分组，组标题上带全选框（可整课 / 整单元选中组卷） */
 async function wrongBook() {
-  view.innerHTML = `<div class="empty">加载中…</div>`;
+  view.innerHTML = listSkeleton('正在加载错题本…', 4);
   let data;
   let textbooks = [];
   let units = [];
@@ -1195,7 +1240,7 @@ function bindCards() {
 
 /* ------------------------------------------------ 试卷（错题组卷） */
 async function renderPaper(id) {
-  view.innerHTML = `<div class="empty">加载中…</div>`;
+  view.innerHTML = listSkeleton('正在打开卷子…', 3);
   let d;
   try {
     d = await api.get(`/papers/${id}`);
@@ -1678,7 +1723,25 @@ filePaper.addEventListener('change', () => handlePaperFile(filePaper));
 filePaperAlbum.addEventListener('change', () => handlePaperFile(filePaperAlbum));
 
 /* ------------------------------------------------ 路由 */
+/* 切页时的顶部进度条：渲染要等接口，期间没有任何变化会让人以为卡住了 */
+let routeSeq = 0;
+function showRouteBar() {
+  let bar = document.getElementById('route-bar');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = 'route-bar';
+    document.body.appendChild(bar);
+  }
+  bar.classList.add('on');
+}
+function hideRouteBar() {
+  const bar = document.getElementById('route-bar');
+  if (bar) bar.classList.remove('on');
+}
+
 async function route() {
+  const seq = ++routeSeq;
+  showRouteBar();
   const hash = location.hash.replace(/^#/, '') || '/';
   document.querySelectorAll('.topnav a').forEach((a) => {
     const nav = a.dataset.nav;
@@ -1703,6 +1766,9 @@ async function route() {
     view.innerHTML = '<div class="empty">页面不存在</div>';
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  } finally {
+    // 只有最后一次路由算数，避免快速切页时前一次把进度条提前关掉
+    if (seq === routeSeq) hideRouteBar();
   }
 }
 
