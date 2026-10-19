@@ -428,6 +428,19 @@ async function home(opts = {}) {
 }
 
 /* ------------------------------------------------ 作业详情 */
+/* 详情页顶部的「返回」：有上一页就回上一页（作业列表 / 组卷页），没有历史就直接回作业列表 */
+function backBtnHtml() {
+  return '<button class="btn sm" id="btn-back" style="flex:0 0 auto">‹ 返回</button>';
+}
+function bindBackBtn() {
+  const b = document.getElementById('btn-back');
+  if (!b) return;
+  b.onclick = () => {
+    if (window.history.length > 1) window.history.back();
+    else location.hash = '#/';
+  };
+}
+
 async function submission(id) {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开这份作业…', 3);
@@ -452,6 +465,7 @@ async function submission(id) {
   view.innerHTML = `
     <div class="card">
       <div class="row wrap">
+        ${backBtnHtml()}
         <h2 style="margin:0">${fmtDate(s.created_at)} 的作业</h2>
         <span class="spacer"></span>
         <span class="badge info">${qs.length} 题</span>
@@ -544,6 +558,7 @@ async function submission(id) {
           </div>`
     }
     <div id="qlist">${qs.map((q) => qCard(q, true)).join('')}</div>`;
+  bindBackBtn();
   const lessonBtn = document.getElementById('btn-save-lesson');
   if (lessonBtn) {
     lessonBtn.onclick = async () => {
@@ -1122,13 +1137,14 @@ async function composePage() {
           : p.sub_status === 'grading'
             ? '<span class="badge gray">批改中</span>'
             : '<span class="badge info">未作答</span>';
-    return `<a class="paper-row" href="#/paper/${esc(p.id)}">
+    return `<div class="paper-row" data-paper="${esc(p.id)}">
+      <input type="checkbox" class="papercheck" data-id="${esc(p.id)}" style="width:20px;height:20px;flex:0 0 auto" />
       <div style="flex:1;min-width:0">
         <div style="font-weight:600">📝 ${esc(p.title)} ${state}</div>
         <div class="small muted">${fmtDate(p.created_at)} · ${p.item_count} 题${place ? ` · ${esc(place)}` : ''}</div>
       </div>
       <span class="muted" style="flex:0 0 auto">›</span>
-    </a>`;
+    </div>`;
   };
 
   const unitOpts = (list) =>
@@ -1177,11 +1193,26 @@ async function composePage() {
         : ''
     }
 
-    <div class="section-title">我的试卷</div>
+    ${
+      papers.length
+        ? `<div class="section-title">我的试卷</div>
+           <div class="card noprint">
+             <div class="row wrap">
+               <b>已组 ${papers.length} 张</b>
+               <span class="spacer"></span>
+               <button class="btn sm" id="p-all">全选</button>
+               <button class="btn sm" id="p-none">清空选择</button>
+               <button class="btn danger sm" id="p-del" disabled>删除</button>
+             </div>
+             <div class="hint">点卷子进去打印 / 交答案；勾选后点「删除」可批量删掉卷子（作业列表里对应的记录也会一起删）。</div>
+           </div>`
+        : ''
+    }
     ${
       papers.length
         ? `<div class="card" style="padding:0">${papers.map(paperRow).join('')}</div>`
-        : `<div class="card"><div class="empty">还没有组过卷。上面挑好母题就能出第一张。</div></div>`
+        : `<div class="section-title">我的试卷</div>
+           <div class="card"><div class="empty">还没有组过卷。上面挑好母题就能出第一张。</div></div>`
     }`;
 
   /* ---- 勾选与计数 ---- */
@@ -1268,6 +1299,59 @@ async function composePage() {
       toast(e.message);
     }
   };
+
+  /* ---- 我的试卷：勾选 + 顶部「删除」批量删 ---- */
+  const pBoxes = () => Array.from(view.querySelectorAll('.papercheck'));
+  const pDelBtn = document.getElementById('p-del');
+  const refreshPaperSel = () => {
+    const n = pBoxes().filter((b) => b.checked).length;
+    if (pDelBtn) {
+      pDelBtn.disabled = !n;
+      pDelBtn.textContent = n ? `删除（${n}）` : '删除';
+    }
+  };
+  pBoxes().forEach((b) => (b.onchange = refreshPaperSel));
+  const pAll = document.getElementById('p-all');
+  if (pAll)
+    pAll.onclick = () => {
+      pBoxes().forEach((b) => (b.checked = true));
+      refreshPaperSel();
+    };
+  const pNone = document.getElementById('p-none');
+  if (pNone)
+    pNone.onclick = () => {
+      pBoxes().forEach((b) => (b.checked = false));
+      refreshPaperSel();
+    };
+  view.querySelectorAll('[data-paper]').forEach((row) => {
+    row.addEventListener('click', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      location.hash = `#/paper/${row.dataset.paper}`;
+    });
+  });
+  if (pDelBtn) {
+    pDelBtn.onclick = async () => {
+      const ids = pBoxes()
+        .filter((b) => b.checked)
+        .map((b) => b.dataset.id);
+      if (!ids.length) return toast('先勾选要删除的卷子');
+      const ok = await confirmDialog(`这 ${ids.length} 张卷子会被删掉，作业列表里对应的记录也会一起删除，无法恢复。`, {
+        title: `删除这 ${ids.length} 张卷子？`,
+        okText: '删除',
+      });
+      if (!ok) return;
+      try {
+        busy('删除中…');
+        for (const pid of ids) await api.del(`/papers/${pid}`);
+        idle();
+        toast(`已删除 ${ids.length} 张卷子`);
+        await composePage();
+      } catch (e) {
+        idle();
+        toast(e.message);
+      }
+    };
+  }
 
   /* ---- 组卷：点按钮才弹设置弹窗 ---- */
   const openBtn = document.getElementById('cm-open');
@@ -1672,6 +1756,7 @@ async function renderPaper(id) {
   view.innerHTML = `
     <div class="card noprint">
       <div class="row wrap">
+        ${backBtnHtml()}
         <h2 style="margin:0">${esc(paper.title)}</h2>
         <span class="tag">组卷</span>
         <span class="badge ${isFinal ? 'pass' : 'gray'}">${isFinal ? '已组卷' : '草稿'}</span>
@@ -1707,6 +1792,7 @@ async function renderPaper(id) {
       }</div>
     </div>
     <div id="pi-list">${items.length ? items.map(itemHtml).join('') : '<div class="empty">这张卷子一道题都没有了</div>'}</div>`;
+  bindBackBtn();
 
   const boxes = () => Array.from(view.querySelectorAll('.pcheck'));
   const refreshSel = () => {

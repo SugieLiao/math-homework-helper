@@ -297,6 +297,8 @@ img.zoomable { cursor: zoom-in; }
   text-decoration: none; color: inherit; border-bottom: 1px solid var(--line);
 }
 .paper-row:last-child { border-bottom: none; }
+.paper-row[data-paper] { cursor: pointer; }
+.paper-row[data-paper]:active { background: var(--bg-2, #f4f6fb); }
 
 /* 加完题后底部的浮条：直达组卷 */
 .queue-tip {
