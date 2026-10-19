@@ -247,7 +247,7 @@ async function home(opts = {}) {
     </div>
     <div class="row wrap" style="margin:12px 0">
       <div class="section-title" style="margin:0">作业记录</div>
-      <select id="sort-pick" title="排序方式" style="width:auto;min-width:118px;flex:0 0 auto;font-size:13px;padding:6px 8px">
+      <select id="sort-pick" title="排序方式" style="width:auto;min-width:124px;flex:0 0 auto;font-size:13px;padding:6px 28px 6px 10px">
         <option value="syllabus" ${sortMode === 'syllabus' ? 'selected' : ''}>按大纲顺序</option>
         <option value="time" ${sortMode === 'time' ? 'selected' : ''}>按创建时间</option>
         <option value="wrong" ${sortMode === 'wrong' ? 'selected' : ''}>按错题数量</option>
