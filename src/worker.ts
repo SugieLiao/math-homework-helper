@@ -1350,11 +1350,23 @@ async function handleApi(
     const form = await req.formData();
     const file = form.get('file') as File | null;
     if (!file) throw new HttpError(400, '没有收到图片');
-    const key = `ans/${qid}.${extOf(file.name)}`;
+    // 每次上传都换一个新文件名：图片地址带一年强缓存，用固定 key 覆盖会导致
+    // 浏览器 / 边缘节点一直显示旧图（重裁后看不到变化）。换 key 天然破缓存。
+    const key = `ans/${qid}-${uuid().slice(0, 8)}.${extOf(file.name)}`;
+    const old = await env.DB.prepare('SELECT answer_image_key FROM questions WHERE id = ?')
+      .bind(qid)
+      .first<any>();
     await env.IMAGES.put(key, await file.arrayBuffer(), {
       httpMetadata: { contentType: contentTypeOf(key) },
     });
     await env.DB.prepare('UPDATE questions SET answer_image_key = ? WHERE id = ?').bind(key, qid).run();
+    if (old?.answer_image_key && old.answer_image_key !== key) {
+      try {
+        await env.IMAGES.delete(old.answer_image_key);
+      } catch (e) {
+        /* 删不掉旧图不影响结果 */
+      }
+    }
     return json({ ok: true, answer_image_key: key });
   }
 
