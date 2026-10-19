@@ -1166,20 +1166,10 @@ async function composePage() {
         <button class="btn sm" id="btn-q-remove" disabled>移除</button>
         <button class="btn danger sm" id="btn-q-clear">🗑 清空待组卷</button>
       </div>
-      <div class="hint">在「作业」详情页或「错题本」里勾选题目，点「加入组卷」就攒到这里。勾选后点「移除」批量移出（题目本身不会删），「清空待组卷」一次清光。勾好这次要用的母题，再点下面的「组卷」设置出卷方式。</div>
-    </div>
-    ${
-      queue.length
-        ? `<div class="card ${queue.length > 8 ? 'q-scroll' : ''}" style="padding:0" id="q-list">${queue
-            .map(itemHtml)
-            .join('')}</div>`
-        : `<div class="card"><div class="empty">还没有待组卷的题目。<br/>去「作业」详情页或「错题本」勾选题目，点「加入组卷」。</div>
-             <div class="row" style="justify-content:center"><a class="btn" href="#/wrong">去错题本挑题</a></div></div>`
-    }
-    ${
-      queue.length
-        ? `<div class="card noprint" id="compose-bar">
-             <div class="row wrap">
+      <div class="hint">在「作业」详情页或「错题本」里勾选题目，点「加入组卷」就攒到这里。勾选后点「移除」批量移出（题目本身不会删），「清空待组卷」一次清光。勾好这次要用的母题，点「组卷」设置出卷方式。</div>
+      ${
+        queue.length
+          ? `<div class="row wrap" id="compose-bar" style="margin-top:10px">
                <span class="small">本次已选 <b id="q-sel">0</b> 道母题</span>
                <span class="spacer"></span>
                <button class="btn primary" id="cm-open" disabled>📝 组卷</button>
@@ -1188,9 +1178,17 @@ async function composePage() {
                textbooks.length
                  ? ''
                  : '<div class="hint" style="color:var(--wrong)">还没有教材，先去<a href="#/textbook">大纲</a>里建一本。</div>'
-             }
-           </div>`
-        : ''
+             }`
+          : ''
+      }
+    </div>
+    ${
+      queue.length
+        ? `<div class="card ${queue.length > 8 ? 'q-scroll' : ''}" style="padding:0" id="q-list">${queue
+            .map(itemHtml)
+            .join('')}</div>`
+        : `<div class="card"><div class="empty">还没有待组卷的题目。<br/>去「作业」详情页或「错题本」勾选题目，点「加入组卷」。</div>
+             <div class="row" style="justify-content:center"><a class="btn" href="#/wrong">去错题本挑题</a></div></div>`
     }
 
     ${
