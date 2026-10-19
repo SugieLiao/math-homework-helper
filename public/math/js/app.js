@@ -1106,8 +1106,6 @@ async function composePage() {
             Number(q.is_correct) === 1 ? '做对了' : '做错了'
           }</span>
           ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
-          <span class="spacer"></span>
-          <button class="btn sm" data-unqueue="${esc(q.id)}">移出</button>
         </div>
         <div class="stem" style="margin:4px 0">${nl2br(q.stem)}</div>
         <div class="small muted">来源：${esc(srcOf(q))}</div>
@@ -1145,13 +1143,14 @@ async function composePage() {
     <div class="card noprint">
       <div class="row wrap">
         <b>待组卷题目</b>
-        <span class="badge info">${queue.length} 道</span>
+        <span class="badge info" id="q-count">${queue.length} 道</span>
         <span class="spacer"></span>
         <button class="btn sm" id="btn-q-all">全选</button>
         <button class="btn sm" id="btn-q-none">清空选择</button>
+        <button class="btn sm" id="btn-q-remove" disabled>移除</button>
         <button class="btn danger sm" id="btn-q-clear">🗑 清空待组卷</button>
       </div>
-      <div class="hint">在「作业」详情页或「错题本」里勾选题目，点「加入组卷」就攒到这里。勾好这次要用的母题，再点下面的「组卷」设置出卷方式。</div>
+      <div class="hint">在「作业」详情页或「错题本」里勾选题目，点「加入组卷」就攒到这里。勾选后点「移除」批量移出（题目本身不会删），「清空待组卷」一次清光。勾好这次要用的母题，再点下面的「组卷」设置出卷方式。</div>
     </div>
     ${
       queue.length
@@ -1192,6 +1191,11 @@ async function composePage() {
     const n = checkedIds().length;
     const selEl = document.getElementById('q-sel');
     if (selEl) selEl.textContent = String(n);
+    const rmBtn = document.getElementById('btn-q-remove');
+    if (rmBtn) {
+      rmBtn.disabled = !n;
+      rmBtn.textContent = n ? `移除（${n}）` : '移除';
+    }
     const openBtn = document.getElementById('cm-open');
     if (openBtn) {
       openBtn.disabled = !n || !textbooks.length;
@@ -1218,9 +1222,10 @@ async function composePage() {
     refresh();
   };
   document.getElementById('btn-q-clear').onclick = async () => {
-    if (!queue.length) return toast('待组卷已经是空的');
+    const total = view.querySelectorAll('[data-row]').length;
+    if (!total) return toast('待组卷已经是空的');
     const ok = await confirmDialog('待组卷里的题目会被全部移出（题目本身不会删）。', {
-      title: `清空这 ${queue.length} 道待组卷题目？`,
+      title: `清空这 ${total} 道待组卷题目？`,
       okText: '清空',
     });
     if (!ok) return;
@@ -1235,17 +1240,34 @@ async function composePage() {
       toast(e.message);
     }
   };
-  view.querySelectorAll('[data-unqueue]').forEach((b) => {
-    b.onclick = async () => {
-      try {
-        await api.del('/paper-queue', { question_ids: [b.dataset.unqueue] });
-        toast('已移出待组卷');
-        await composePage();
-      } catch (e) {
-        toast(e.message);
-      }
-    };
-  });
+  // 批量移出：勾哪几道就移哪几道（题目本身不删，随时能再加回来）
+  document.getElementById('btn-q-remove').onclick = async () => {
+    const ids = checkedIds();
+    if (!ids.length) return toast('先勾选要移出的题目');
+    const ok = await confirmDialog(`这 ${ids.length} 道题会从待组卷里移出，题目本身不会删，之后还能再「加入组卷」。`, {
+      title: `移出这 ${ids.length} 道题？`,
+      okText: '移出',
+    });
+    if (!ok) return;
+    try {
+      busy('移出中…');
+      await api.del('/paper-queue', { question_ids: ids });
+      idle();
+      toast(`已移出 ${ids.length} 道`);
+      // 就地删行，不整页重渲染：否则刚勾的其它题也被清掉，看起来像「白选了」
+      ids.forEach((id) => {
+        view.querySelector(`[data-row="${id}"]`)?.remove();
+      });
+      const left = view.querySelectorAll('[data-row]').length;
+      if (!left) return await composePage();
+      const cnt = document.getElementById('q-count');
+      if (cnt) cnt.textContent = `${left} 道`;
+      refresh();
+    } catch (e) {
+      idle();
+      toast(e.message);
+    }
+  };
 
   /* ---- 组卷：点按钮才弹设置弹窗 ---- */
   const openBtn = document.getElementById('cm-open');
