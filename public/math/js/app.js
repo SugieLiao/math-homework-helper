@@ -64,6 +64,7 @@ function qCard(q, withCheck = false) {
 
 /* ------------------------------------------------ 首页 */
 const TB_KEY = 'mh_textbook';
+const SORT_KEY = 'mh_sort'; // 作业列表排序方式：syllabus 大纲顺序 / time 创建时间 / wrong 错题数量
 
 /* 交作业弹窗：点「拍照 / 相册」时先弹出来，让用户选这次作业归到哪一课，再调起相机 */
 let pendingKind = null; // 'shoot' | 'album'
@@ -204,6 +205,8 @@ async function home(opts = {}) {
     const t = await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook');
     units = t.units || [];
   } catch (e) { /* 大纲拉不到不影响主流程 */ }
+  // 排序方式：没传就用上次选的，默认按大纲顺序
+  const sortMode = opts.sort || localStorage.getItem(SORT_KEY) || 'syllabus';
 
   if (stalePage(epoch)) return;
 
@@ -244,6 +247,11 @@ async function home(opts = {}) {
     </div>
     <div class="row wrap" style="margin:12px 0">
       <div class="section-title" style="margin:0">作业记录</div>
+      <select id="sort-pick" title="排序方式" style="width:auto;min-width:118px;flex:0 0 auto;font-size:13px;padding:6px 8px">
+        <option value="syllabus" ${sortMode === 'syllabus' ? 'selected' : ''}>按大纲顺序</option>
+        <option value="time" ${sortMode === 'time' ? 'selected' : ''}>按创建时间</option>
+        <option value="wrong" ${sortMode === 'wrong' ? 'selected' : ''}>按错题数量</option>
+      </select>
       <span class="spacer"></span>
       <button class="btn sm" id="btn-trash">🗑 删除作业</button>
       <span id="del-ops" class="row wrap hidden">
@@ -268,6 +276,10 @@ async function home(opts = {}) {
   };
   document.getElementById('filter-lesson').onchange = async (e) => {
     await home({ textbook: tbId, lesson: e.target.value });
+  };
+  document.getElementById('sort-pick').onchange = async (e) => {
+    localStorage.setItem(SORT_KEY, e.target.value);
+    await home({ textbook: tbId, lesson: lessonFilter, sort: e.target.value });
   };
 
   let data;
@@ -334,7 +346,11 @@ async function home(opts = {}) {
     if (s.state === 'error') return `<span class="badge wrong">批改失败</span>`;
     return `<span class="badge ${s.wrong ? 'wrong' : 'pass'}">${s.wrong ? `错 ${s.wrong} 题` : '全对'}</span>`;
   };
-  const rowHtml = (s) => {
+  // 平铺排序（时间 / 错题数）时列表不再按单元分块，行里得自己带上归属，否则看不出是哪一课的
+  const placeOf = (s) =>
+    [s.unit_name, s.lesson_name].filter(Boolean).join(' › ') ||
+    (s.paper_textbook_name ? `${s.paper_textbook_name}（未指定单元）` : '未归类');
+  const rowHtml = (s, showPlace = false) => {
     const isPaper = !!s.paper_id;
     const href = isPaper ? `#/paper/${s.paper_id}` : `#/s/${s.id}`;
     const thumb = s.image_key
@@ -342,11 +358,13 @@ async function home(opts = {}) {
       : `<div class="sub-thumb sub-thumb-ph">📄</div>`;
     const title = isPaper ? `📝 ${esc(s.paper_title || '练习卷')}` : fmtDate(s.created_at);
     const pageTag = Number(s.pages) > 1 ? ` · ${s.pages} 页` : '';
-    const meta = isPaper
-      ? `${fmtDate(s.created_at)} · ${s.total} 题${pageTag}`
-      : s.state === 'pending'
-        ? `${s.total} 题（还没做）${pageTag}`
-        : `${s.total} 题${pageTag} · 错 ${s.wrong} 题 · 过关 ${s.passed} 题`;
+    const meta =
+      (isPaper
+        ? `${fmtDate(s.created_at)} · ${s.total} 题${pageTag}`
+        : s.state === 'pending'
+          ? `${s.total} 题（还没做）${pageTag}`
+          : `${s.total} 题${pageTag} · 错 ${s.wrong} 题 · 过关 ${s.passed} 题`) +
+      (showPlace ? ` · ${esc(placeOf(s))}` : '');
     return `
     <div class="sub-item" style="border-bottom:1px solid var(--line)">
       <input type="checkbox" class="sub-check" data-id="${s.id}" style="width:20px;height:20px;flex:0 0 auto" />
@@ -362,19 +380,46 @@ async function home(opts = {}) {
   };
 
   let html = '';
-  let lastUnit = null;
-  blocks.forEach((b) => {
-    if (b.uKey !== lastUnit) {
-      if (lastUnit !== null) html += `</div>`;
-      html += `<div class="section-title" style="margin-top:16px">${esc(b.uName)}</div><div class="card" style="padding:0">`;
-      lastUnit = b.uKey;
-    }
-    html += `<div class="row wrap" style="padding:8px 10px 4px;background:#f7f9ff;border-bottom:1px solid var(--line)">
-        <b>${esc(b.lName)}</b><span class="small muted" style="margin-left:8px">${b.items.length} 份</span>
-      </div>`;
-    html += b.items.map(rowHtml).join('');
-  });
-  html += `</div>`;
+  if (sortMode === 'syllabus') {
+    // 按大纲顺序：块（单元 → 课文）按它在大纲里的先后排，认不出来的（未归类 / 只归到教材）放最后
+    const rankOf = (b) => {
+      const ui = units.findIndex((u) => u.id === b.uKey);
+      const unitIdx = ui < 0 ? 9999 : ui;
+      const lj = ui < 0 ? -1 : (units[ui]?.lessons || []).findIndex((l) => l.id === b.lKey);
+      return [unitIdx, lj < 0 ? 9999 : lj];
+    };
+    blocks.sort((a, b) => {
+      const ra = rankOf(a);
+      const rb = rankOf(b);
+      return ra[0] - rb[0] || ra[1] - rb[1];
+    });
+    let lastUnit = null;
+    blocks.forEach((b) => {
+      if (b.uKey !== lastUnit) {
+        if (lastUnit !== null) html += `</div>`;
+        html += `<div class="section-title" style="margin-top:16px">${esc(b.uName)}</div><div class="card" style="padding:0">`;
+        lastUnit = b.uKey;
+      }
+      html += `<div class="row wrap" style="padding:8px 10px 4px;background:#f7f9ff;border-bottom:1px solid var(--line)">
+          <b>${esc(b.lName)}</b><span class="small muted" style="margin-left:8px">${b.items.length} 份</span>
+        </div>`;
+      html += b.items.map((s) => rowHtml(s)).join('');
+    });
+    html += `</div>`;
+  } else {
+    // 平铺：不按单元分块，整份作业一条，按时间或错题数排
+    const timeMs = (s) => {
+      const t = Date.parse(String(s.created_at || ''));
+      return Number.isFinite(t) ? t : 0;
+    };
+    const flat = subs.slice();
+    if (sortMode === 'time') flat.sort((a, b) => timeMs(b) - timeMs(a));
+    else flat.sort((a, b) => (Number(b.wrong) || 0) - (Number(a.wrong) || 0) || timeMs(b) - timeMs(a));
+    html += `<div class="small muted" style="margin:2px 2px 6px">${
+      sortMode === 'time' ? '按创建时间排（新 → 旧）' : '按错题数量排（错得多 → 错得少，没做的排最后）'
+    }</div>`;
+    html += `<div class="card" style="padding:0">${flat.map((s) => rowHtml(s, true)).join('')}</div>`;
+  }
   list.innerHTML = html;
 
   /* 删除：默认不显示勾选框，点顶部垃圾桶才进入删除模式 */
