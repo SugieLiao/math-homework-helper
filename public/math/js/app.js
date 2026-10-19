@@ -1559,6 +1559,10 @@ function renderShotsTray() {
     .join('');
   const canAdd = trayFiles.length < MAX_PAGES;
   const verb = trayKind === 'shoot' ? '拍' : '选';
+  const other =
+    trayKind === 'shoot'
+      ? `<button class="btn sm" id="tray-add-album">🖼 从相册再选几张</button>`
+      : `<button class="btn sm" id="tray-add-camera">📷 现拍一张</button>`;
   wrap.innerHTML = `
     <div class="modal-card tray-card">
       <h3>已经凑了 ${trayFiles.length} 页</h3>
@@ -1568,6 +1572,7 @@ function renderShotsTray() {
         ${canAdd ? `<button class="tray-add" id="tray-add"><span>＋</span><em>再${verb}一张</em></button>` : ''}
       </div>
       <div class="hint">${canAdd ? '每张照片算这份作业的一页，选错的点 × 删掉。' : `一次最多 ${MAX_PAGES} 页，多的分两次交。`}</div>
+      ${canAdd ? `<div class="tray-other">${other}</div>` : ''}
       <div class="row-end" style="margin-top:14px">
         <button class="btn" id="tray-cancel">取消</button>
         <button class="btn primary" id="tray-go">开始批改（${trayFiles.length} 页）</button>
@@ -1605,6 +1610,14 @@ document.addEventListener('click', (e) => {
   if (t.closest('#tray-add')) {
     // 必须在这次点击的用户手势里同步调起，iOS 才肯弹相机/相册
     document.getElementById(trayKind === 'shoot' ? 'file-homework' : 'file-homework-album').click();
+    return;
+  }
+  if (t.closest('#tray-add-camera')) {
+    document.getElementById('file-homework').click();
+    return;
+  }
+  if (t.closest('#tray-add-album')) {
+    document.getElementById('file-homework-album').click();
     return;
   }
   if (t.closest('#tray-cancel')) {
