@@ -173,6 +173,10 @@ img.zoomable { cursor: zoom-in; }
 .modal { position: fixed; inset: 0; background: rgba(20,24,35,.45); display: flex; align-items: center; justify-content: center; z-index: 120; padding: 16px; }
 .modal-card { background: #fff; border-radius: 16px; padding: 20px; width: 100%; max-width: 380px; max-height: calc(100vh - 32px); overflow-y: auto; }
 .modal-card h3 { margin-top: 0; }
+/* 表单较多的弹窗（组卷设置）：宽一点，底部操作条滚动时钉在卡底，随时能点「开始组卷」 */
+.modal-card.wide { max-width: 460px; }
+.modal-foot { position: sticky; bottom: 0; margin: 6px -20px -20px; padding: 12px 20px 16px;
+  background: #fff; border-top: 1px solid var(--line); border-radius: 0 0 16px 16px; }
 .confirm-card .confirm-msg { font-size: 14px; line-height: 1.7; color: var(--ink-2); margin: 8px 0 18px; white-space: pre-wrap; }
 .confirm-card .row-end { gap: 10px; }
 .confirm-card .row-end .btn { min-width: 84px; }
