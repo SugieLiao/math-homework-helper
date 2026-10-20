@@ -1,30 +1,47 @@
 -- 数学家 · 数据库结构（Cloudflare D1 / SQLite）
 
-CREATE TABLE IF NOT EXISTS settings (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),
-  base_url      TEXT DEFAULT 'https://ark.cn-beijing.volces.com/api/v3',
-  api_key       TEXT DEFAULT '',
-  model         TEXT DEFAULT 'doubao-seed-2-0-mini-260428',
-  grade         TEXT DEFAULT '一年级',
-  student_name  TEXT DEFAULT '',
-  passcode      TEXT DEFAULT '',
-  -- 文本 / 推理模型槽位（出题、讲解，不用看图）。留空则自动回落用上面的视觉模型
-  text_base_url TEXT DEFAULT '',
-  text_api_key  TEXT DEFAULT '',
-  text_model    TEXT DEFAULT '',
-  -- 当前启用的「模型源」id（见 llm_profiles）。优先于上面 base_url/api_key/model 的旧写法
-  active_vision_profile TEXT DEFAULT '',
-  active_text_profile   TEXT DEFAULT '',
-  -- 思考强度：fast = 关/低思考（一页 15~30 秒）；deep = 用模型默认（90~120 秒，可能超时）
-  thinking_mode TEXT DEFAULT 'fast',
-  updated_at    TEXT
+-- 用户：每个人的作业、题目、变式、组卷、大纲、模型设置都各自独立
+CREATE TABLE IF NOT EXISTS users (
+  id         TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  avatar     TEXT DEFAULT '',
+  sort       INTEGER DEFAULT 0,
+  created_at TEXT
 );
 
-INSERT OR IGNORE INTO settings (id, updated_at) VALUES (1, datetime('now'));
+INSERT OR IGNORE INTO users (id, name, avatar, sort, created_at)
+VALUES ('u_xiaoqi', '小七', '🐣', 0, datetime('now'));
+
+-- 全局配置（家庭口令，全站一份，不随用户切换）
+CREATE TABLE IF NOT EXISTS app_config (
+  id         INTEGER PRIMARY KEY CHECK (id = 1),
+  passcode   TEXT DEFAULT '',
+  updated_at TEXT
+);
+
+-- 每个用户一份 AI / 年级设置
+CREATE TABLE IF NOT EXISTS user_settings (
+  user_id              TEXT PRIMARY KEY,
+  base_url             TEXT DEFAULT 'https://ark.cn-beijing.volces.com/api/v3',
+  api_key              TEXT DEFAULT '',
+  model                TEXT DEFAULT 'doubao-seed-2-0-mini-260428',
+  grade                TEXT DEFAULT '一年级',
+  student_name         TEXT DEFAULT '',
+  text_base_url        TEXT DEFAULT '',
+  text_api_key         TEXT DEFAULT '',
+  text_model           TEXT DEFAULT '',
+  active_vision_profile TEXT DEFAULT '',
+  active_text_profile   TEXT DEFAULT '',
+  thinking_mode        TEXT DEFAULT 'fast',
+  updated_at           TEXT
+);
+
+INSERT OR IGNORE INTO user_settings (user_id, updated_at) VALUES ('u_xiaoqi', datetime('now'));
 
 -- 教材（如「北师大版 四年级上册」）
 CREATE TABLE IF NOT EXISTS textbooks (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   name        TEXT NOT NULL,
   sort        INTEGER DEFAULT 0,
   is_custom   INTEGER DEFAULT 0,
@@ -34,6 +51,7 @@ CREATE TABLE IF NOT EXISTS textbooks (
 -- 教材单元（如「一 认识更大的数」）
 CREATE TABLE IF NOT EXISTS units (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   textbook_id TEXT,                  -- 属于哪本教材
   name        TEXT NOT NULL,
   sort        INTEGER DEFAULT 0,
@@ -44,6 +62,7 @@ CREATE TABLE IF NOT EXISTS units (
 -- 课文 / 一课（如「数一数」「一单元复习」「邓老师题单二单元」）
 CREATE TABLE IF NOT EXISTS lessons (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   unit_id     TEXT NOT NULL,
   name        TEXT NOT NULL,
   sort        INTEGER DEFAULT 0,
@@ -54,6 +73,7 @@ CREATE TABLE IF NOT EXISTS lessons (
 -- 模型源库：可以同时保存多家配置（智谱 / 百炼 / 火山 / 硅基流动…），随时切换，互不覆盖
 CREATE TABLE IF NOT EXISTS llm_profiles (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   name        TEXT NOT NULL,          -- 自定义名字，如「智谱免费视觉」
   base_url    TEXT NOT NULL,
   api_key     TEXT DEFAULT '',
@@ -68,6 +88,7 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
 -- 一次拍照提交（作业 / 举一反三答案 / 组卷答卷）
 CREATE TABLE IF NOT EXISTS submissions (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   kind        TEXT NOT NULL,          -- homework | variant | paper
   parent_id   TEXT,                   -- kind=variant 时的母题 id
   lesson_id   TEXT,                   -- 归属课文（units/lessons），用于按单元复习
@@ -95,6 +116,7 @@ CREATE INDEX IF NOT EXISTS idx_pages_sub ON submission_pages (submission_id);
 -- 母题（作业里识别出来的每一道题）
 CREATE TABLE IF NOT EXISTS questions (
   id              TEXT PRIMARY KEY,
+  user_id         TEXT DEFAULT 'u_xiaoqi',
   submission_id   TEXT,
   seq             INTEGER,
   no              TEXT,               -- 题号
@@ -117,6 +139,7 @@ CREATE INDEX IF NOT EXISTS idx_questions_created ON questions (created_at);
 -- 举一反三（变式题）
 CREATE TABLE IF NOT EXISTS variants (
   id             TEXT PRIMARY KEY,
+  user_id        TEXT DEFAULT 'u_xiaoqi',
   parent_id      TEXT NOT NULL,
   seq            INTEGER,
   stem           TEXT,
@@ -138,6 +161,7 @@ CREATE INDEX IF NOT EXISTS idx_variants_parent ON variants (parent_id);
 -- 一行要么是母题（question_id），要么是举一反三的变式题（variant_id），二者互斥。
 CREATE TABLE IF NOT EXISTS paper_queue (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   question_id TEXT,                   -- 母题 id
   variant_id  TEXT,                   -- 变式题 id（来自「题目 → 举一反三」页）
   created_at  TEXT
@@ -150,6 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_paper_queue_created ON paper_queue (created_at);
 -- 组卷：从待组卷题目里挑若干道母题，原题直接成卷或每道出 N 道类似题
 CREATE TABLE IF NOT EXISTS papers (
   id          TEXT PRIMARY KEY,
+  user_id     TEXT DEFAULT 'u_xiaoqi',
   title       TEXT NOT NULL,          -- 卷子标题，如「练习卷 10-18」
   ordered     INTEGER DEFAULT 1,      -- 1 = 按母题顺序组卷；0 = 乱序
   status      TEXT DEFAULT 'draft',   -- draft = 还在编辑；final = 已确认组卷
@@ -166,6 +191,7 @@ CREATE TABLE IF NOT EXISTS papers (
 
 CREATE TABLE IF NOT EXISTS paper_items (
   id            TEXT PRIMARY KEY,
+  user_id       TEXT DEFAULT 'u_xiaoqi',
   paper_id      TEXT NOT NULL,
   pos           INTEGER DEFAULT 0,    -- 卷内顺序，用户可拖动改
   stem          TEXT,

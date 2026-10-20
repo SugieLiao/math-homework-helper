@@ -17,11 +17,29 @@
       <a href="#/textbook" data-nav="/textbook">大纲</a>
       <a href="#/settings" data-nav="/settings">设置</a>
     </nav>
+    <button class="user-chip" id="user-chip" title="切换用户">
+      <span class="uc-avatar" id="uc-avatar">🐣</span>
+      <span class="uc-name" id="uc-name">小七</span>
+    </button>
   </header>
   <main id="view"></main>
   <div id="toast" class="toast"></div>
   <div id="mask" class="mask hidden"><div class="mask-box"><div class="spinner"></div><div id="mask-text">处理中…</div></div></div>
 </div>
+
+<!-- 切换用户 -->
+<div id="user-modal" class="modal hidden">
+  <div class="modal-card">
+    <h3>切换用户</h3>
+    <div class="hint">每个人的作业、错题、变式、卷子、大纲、模型设置都是分开存的，互不影响。</div>
+    <div id="user-list" class="user-list"></div>
+    <div class="row-end" style="margin-top:12px">
+      <button class="btn" id="user-manage">管理用户</button>
+      <button class="btn primary" id="user-close">关闭</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- 口令弹窗 -->
 <div id="pass-modal" class="modal hidden">

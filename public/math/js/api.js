@@ -9,6 +9,23 @@ export function setPasscode(v) {
   else localStorage.removeItem('mh_pass');
 }
 
+/* 当前用户：存在本机 localStorage 里，每台设备各记各的。
+   所有请求都带 X-User-Id，后端据此隔离作业/错题/大纲/模型设置。 */
+export function getUserId() {
+  return localStorage.getItem('mh_uid') || '';
+}
+export function setUserId(v) {
+  if (v) localStorage.setItem('mh_uid', v);
+  else localStorage.removeItem('mh_uid');
+}
+
+// 请求头和上传都要带，抽出来避免两处写漏
+function userHeader(headers) {
+  const uid = getUserId();
+  if (uid) headers['X-User-Id'] = uid;
+  return headers;
+}
+
 let onUnauthorized = null;
 export function setUnauthorizedHandler(fn) {
   onUnauthorized = fn;
@@ -18,6 +35,7 @@ async function request(path, options = {}) {
   const headers = Object.assign({ 'Content-Type': 'application/json' }, options.headers || {});
   const pass = getPasscode();
   if (pass) headers['X-Passcode'] = pass;
+  userHeader(headers);
   let res;
   try {
     res = await fetch(BASE + path, { ...options, headers });
@@ -48,6 +66,7 @@ export const api = {
     const headers = {};
     const pass = getPasscode();
     if (pass) headers['X-Passcode'] = pass;
+    userHeader(headers);
     const res = await fetch(BASE + path, { method, body: fd, headers });
     if (res.status === 401) {
       if (onUnauthorized) onUnauthorized();

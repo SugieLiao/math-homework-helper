@@ -98,7 +98,6 @@ interface Settings {
   model: string;
   grade: string;
   student_name: string;
-  passcode: string;
   /** 文本 / 推理模型槽位（出题、讲解）。留空则自动回落用视觉模型 */
   text_base_url: string;
   text_api_key: string;
@@ -110,15 +109,28 @@ interface Settings {
   thinking_mode: string;
 }
 
-async function getSettings(env: Env): Promise<Settings> {
-  const row = await env.DB.prepare('SELECT * FROM settings WHERE id = 1').first<any>();
+/** 迁移前所有数据都属于它；库里一个人都没有时也回落到它 */
+const DEFAULT_UID = 'u_xiaoqi';
+
+/** 家庭口令是全局的：谁进来都要过这一道门，不随用户切换而变 */
+async function getPasscode(env: Env): Promise<string> {
+  const r = await env.DB.prepare('SELECT passcode FROM app_config WHERE id = 1').first<any>();
+  return r?.passcode || '';
+}
+
+/** 新用户可能还没有设置行，写之前先补一行空的 */
+async function ensureSettingsRow(env: Env, uid: string): Promise<void> {
+  await env.DB.prepare('INSERT OR IGNORE INTO user_settings (user_id, updated_at) VALUES (?, ?)').bind(uid, now()).run();
+}
+
+async function getSettings(env: Env, uid: string): Promise<Settings> {
+  const row = await env.DB.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(uid).first<any>();
   return {
     base_url: row?.base_url || DEFAULT_BASE,
     api_key: row?.api_key || '',
     model: row?.model || DEFAULT_MODEL,
     grade: row?.grade || '一年级',
     student_name: row?.student_name || '',
-    passcode: row?.passcode || '',
     text_base_url: row?.text_base_url || '',
     text_api_key: row?.text_api_key || '',
     text_model: row?.text_model || '',
@@ -140,8 +152,8 @@ interface Profile {
   note: string;
 }
 
-async function listProfiles(env: Env): Promise<Profile[]> {
-  const r = await env.DB.prepare('SELECT * FROM llm_profiles ORDER BY created_at').all<any>();
+async function listProfiles(env: Env, uid: string): Promise<Profile[]> {
+  const r = await env.DB.prepare('SELECT * FROM llm_profiles WHERE user_id = ? ORDER BY created_at').bind(uid).all<any>();
   return (r.results || []).map((x) => ({
     id: x.id,
     name: x.name,
@@ -153,9 +165,9 @@ async function listProfiles(env: Env): Promise<Profile[]> {
   }));
 }
 
-async function getProfile(env: Env, id: string): Promise<Profile | null> {
+async function getProfile(env: Env, id: string, uid: string): Promise<Profile | null> {
   if (!id) return null;
-  const x = await env.DB.prepare('SELECT * FROM llm_profiles WHERE id = ?').bind(id).first<any>();
+  const x = await env.DB.prepare('SELECT * FROM llm_profiles WHERE id = ? AND user_id = ?').bind(id, uid).first<any>();
   if (!x) return null;
   return {
     id: x.id,
@@ -173,13 +185,14 @@ async function saveProfile(
   env: Env,
   id: string,
   patch: { name?: string; base_url?: string; api_key?: string; model?: string; kind?: string; note?: string },
+  uid: string,
 ): Promise<void> {
-  const cur = await getProfile(env, id);
+  const cur = await getProfile(env, id, uid);
   if (!cur) throw new HttpError(404, '模型源不存在');
   await env.DB.prepare(
     `UPDATE llm_profiles SET
       name = ?, base_url = ?, api_key = ?, model = ?, kind = ?, note = ?, updated_at = ?
-     WHERE id = ?`,
+     WHERE id = ? AND user_id = ?`,
   )
     .bind(
       patch.name ?? cur.name,
@@ -190,22 +203,23 @@ async function saveProfile(
       patch.note ?? cur.note,
       now(),
       id,
+      uid,
     )
     .run();
 }
 
-/** 老配置（settings 表里那一份）自动迁进模型源库，只迁一次 */
-async function migrateLegacyProfile(env: Env, s: Settings): Promise<void> {
-  const existing = await env.DB.prepare('SELECT COUNT(*) AS c FROM llm_profiles').first<any>();
+/** 老配置（settings 表里那一份）自动迁进模型源库，只迁一次（每个用户各迁各的） */
+async function migrateLegacyProfile(env: Env, s: Settings, uid: string): Promise<void> {
+  const existing = await env.DB.prepare('SELECT COUNT(*) AS c FROM llm_profiles WHERE user_id = ?').bind(uid).first<any>();
   if (Number(existing?.c || 0) > 0) return;
   if (!s.api_key) return;
   const id = uuid();
   await env.DB.prepare(
-    'INSERT INTO llm_profiles (id, name, base_url, api_key, model, kind, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)',
+    'INSERT INTO llm_profiles (id, user_id, name, base_url, api_key, model, kind, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
   )
-    .bind(id, '视觉模型（旧配置）', s.base_url, s.api_key, s.model || DEFAULT_MODEL, 'vision', '', now(), now())
+    .bind(id, uid, '视觉模型（旧配置）', s.base_url, s.api_key, s.model || DEFAULT_MODEL, 'vision', '', now(), now())
     .run();
-  await env.DB.prepare('UPDATE settings SET active_vision_profile = ? WHERE id = 1').bind(id).run();
+  await env.DB.prepare('UPDATE user_settings SET active_vision_profile = ? WHERE user_id = ?').bind(id, uid).run();
 }
 
 interface ActiveConfig {
@@ -214,19 +228,19 @@ interface ActiveConfig {
   model: string;
 }
 
-/** 取当前生效的配置：优先「当前启用的模型源」，其次老写法（settings 那几列） */
-async function getActiveConfig(env: Env, useText: boolean, s?: Settings): Promise<ActiveConfig | null> {
-  const st = s || (await getSettings(env));
-  await migrateLegacyProfile(env, st);
+/** 取当前生效的配置：优先「当前启用的模型源」，其次老写法（user_settings 那几列） */
+async function getActiveConfig(env: Env, uid: string, useText: boolean, s?: Settings): Promise<ActiveConfig | null> {
+  const st = s || (await getSettings(env, uid));
+  await migrateLegacyProfile(env, st, uid);
   if (useText) {
-    const p = await getProfile(env, st.active_text_profile);
+    const p = await getProfile(env, st.active_text_profile, uid);
     if (p && p.api_key && p.model) return { base_url: p.base_url, api_key: p.api_key, model: p.model };
     if (st.text_api_key && st.text_model) {
       return { base_url: st.text_base_url || st.base_url, api_key: st.text_api_key, model: st.text_model };
     }
     return null;
   }
-  const p = await getProfile(env, st.active_vision_profile);
+  const p = await getProfile(env, st.active_vision_profile, uid);
   if (p && p.api_key && p.model) return { base_url: p.base_url, api_key: p.api_key, model: p.model };
   if (st.api_key) return { base_url: st.base_url, api_key: st.api_key, model: st.model || DEFAULT_MODEL };
   return null;
@@ -287,6 +301,13 @@ function shuffleInPlace<T>(arr: T[]): T[] {
   return arr;
 }
 
+/** 取一张属于当前用户的卷子，别人的 / 不存在的都当 404 */
+async function ownPaper(env: Env, pid: string, uid: string): Promise<any> {
+  const row = await env.DB.prepare('SELECT * FROM papers WHERE id = ? AND user_id = ?').bind(pid, uid).first<any>();
+  if (!row) throw new HttpError(404, '卷子不存在');
+  return row;
+}
+
 /** 删题后把 pos 重新收紧成 0,1,2…，避免出现跳号 */
 async function renumberPaper(env: Env, paperId: string): Promise<void> {
   const rows = await env.DB.prepare('SELECT id FROM paper_items WHERE paper_id = ? ORDER BY pos ASC, created_at ASC')
@@ -338,14 +359,15 @@ function canSeeImages(base: string, model: string): boolean {
 
 async function llm(
   env: Env,
+  uid: string,
   system: string,
   userText: string,
   opts: LlmOptions = {},
 ): Promise<string> {
-  const s = await getSettings(env);
+  const s = await getSettings(env, uid);
   // 文本槽位单独配了才启用，否则自动回落到视觉模型
-  let cfg = await getActiveConfig(env, !!opts.text, s);
-  if (!cfg) cfg = await getActiveConfig(env, false, s);
+  let cfg = await getActiveConfig(env, uid, !!opts.text, s);
+  if (!cfg) cfg = await getActiveConfig(env, uid, false, s);
   if (!cfg) {
     throw new HttpError(400, '还没有配置大模型 API Key，请先到「设置」里添加模型源。');
   }
@@ -560,11 +582,30 @@ function cookiePass(req: Request): string | null {
 }
 
 async function requireAuth(req: Request, env: Env): Promise<Response | null> {
-  const s = await getSettings(env);
-  if (!s.passcode) return null;
+  const passcode = await getPasscode(env);
+  if (!passcode) return null;
   const provided = req.headers.get('X-Passcode') || cookiePass(req) || '';
-  if (provided !== s.passcode) return json({ error: '需要家庭口令' }, 401);
+  if (provided !== passcode) return json({ error: '需要家庭口令' }, 401);
   return null;
+}
+
+/* ------------------------------------------------------------------ 用户 */
+
+interface UserRow {
+  id: string;
+  name: string;
+  avatar: string;
+}
+
+/** 当前请求说的是哪个用户：请求头没带 / 带了个不存在的，都回落到第一个用户 */
+async function resolveUser(req: Request, env: Env): Promise<UserRow> {
+  const want = (req.headers.get('X-User-Id') || '').trim();
+  if (want) {
+    const row = await env.DB.prepare('SELECT id, name, avatar FROM users WHERE id = ?').bind(want).first<any>();
+    if (row) return { id: row.id, name: row.name, avatar: row.avatar || '' };
+  }
+  const def = await env.DB.prepare('SELECT id, name, avatar FROM users ORDER BY sort ASC, created_at ASC LIMIT 1').first<any>();
+  return def ? { id: def.id, name: def.name, avatar: def.avatar || '' } : { id: DEFAULT_UID, name: '小七', avatar: '🐣' };
 }
 
 /* ------------------------------------------------------------------ router */
@@ -590,7 +631,8 @@ export default {
         if (denied && !apiPath.startsWith('/unlock') && !apiPath.startsWith('/settings/need')) {
           return denied;
         }
-        return await handleApi(req, env, apiPath, url);
+        const user = await resolveUser(req, env);
+        return await handleApi(req, env, apiPath, url, user);
       }
 
       if (path.startsWith('/math')) {
@@ -608,16 +650,16 @@ export default {
 
 /* ------------------------------------------------- 教材大纲辅助函数 */
 
-async function textbookTree(env: Env, textbookId?: string): Promise<any[]> {
-  let sql = 'SELECT * FROM units';
-  const binds: any[] = [];
+async function textbookTree(env: Env, uid: string, textbookId?: string): Promise<any[]> {
+  let sql = 'SELECT * FROM units WHERE user_id = ?';
+  const binds: any[] = [uid];
   if (textbookId) {
-    sql += ' WHERE textbook_id = ?';
+    sql += ' AND textbook_id = ?';
     binds.push(textbookId);
   }
   sql += ' ORDER BY sort, name';
   const us = await env.DB.prepare(sql).bind(...binds).all<any>();
-  const ls = await env.DB.prepare('SELECT * FROM lessons ORDER BY sort, name').all<any>();
+  const ls = await env.DB.prepare('SELECT * FROM lessons WHERE user_id = ? ORDER BY sort, name').bind(uid).all<any>();
   const units = us.results || [];
   const lessons = ls.results || [];
   return units.map((u) => ({
@@ -631,18 +673,24 @@ async function textbookTree(env: Env, textbookId?: string): Promise<any[]> {
 }
 
 /** 当前默认教材（第一本），找不到返回 null */
-async function defaultTextbookId(env: Env): Promise<string | null> {
-  const row = await env.DB.prepare('SELECT id FROM textbooks ORDER BY sort, name LIMIT 1').first<any>();
+async function defaultTextbookId(env: Env, uid: string): Promise<string | null> {
+  const row = await env.DB.prepare('SELECT id FROM textbooks WHERE user_id = ? ORDER BY sort, name LIMIT 1')
+    .bind(uid)
+    .first<any>();
   return row ? row.id : null;
 }
 
 /** 没有归属单元的自定义课文，统一塞进「自定义」单元（没有就建一个） */
-async function ensureCustomUnit(env: Env, textbookId?: string): Promise<string> {
-  const tbId = textbookId || (await defaultTextbookId(env)) || '';
+async function ensureCustomUnit(env: Env, uid: string, textbookId?: string): Promise<string> {
+  const tbId = textbookId || (await defaultTextbookId(env, uid)) || '';
+  if (tbId) {
+    const own = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ? AND user_id = ?').bind(tbId, uid).first<any>();
+    if (!own) throw new HttpError(400, '所选教材不存在');
+  }
   const row = await env.DB.prepare(
-    "SELECT id FROM units WHERE name = '自定义' AND is_custom = 1 AND COALESCE(textbook_id,'') = ?",
+    "SELECT id FROM units WHERE user_id = ? AND name = '自定义' AND is_custom = 1 AND COALESCE(textbook_id,'') = ?",
   )
-    .bind(tbId)
+    .bind(uid, tbId)
     .first<any>();
   if (row) return row.id;
   const id = 'cu' + uuid();
@@ -650,9 +698,9 @@ async function ensureCustomUnit(env: Env, textbookId?: string): Promise<string> 
     .bind(tbId)
     .first<any>();
   await env.DB.prepare(
-    'INSERT INTO units (id, textbook_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,1,?)',
+    'INSERT INTO units (id, user_id, textbook_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,1,?)',
   )
-    .bind(id, tbId, '自定义', Number(mx?.m || 0) + 1, now())
+    .bind(id, uid, tbId, '自定义', Number(mx?.m || 0) + 1, now())
     .run();
   return id;
 }
@@ -747,9 +795,31 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
   await Promise.all(keys.map((k) => env.IMAGES.delete(k).catch(() => {})));
 }
 
+/** 删掉一个用户的全部数据（作业、题目、变式、组卷、大纲、模型源、设置） */
+async function deleteUserData(env: Env, uid: string): Promise<void> {
+  const subs = await env.DB.prepare('SELECT id FROM submissions WHERE user_id = ?').bind(uid).all<any>();
+  const subIds = (subs.results || []).map((r: any) => r.id);
+  if (subIds.length) {
+    const ph = subIds.map(() => '?').join(',');
+    await env.DB.prepare(`DELETE FROM submission_pages WHERE submission_id IN (${ph})`).bind(...subIds).run();
+  }
+  await env.DB.prepare('DELETE FROM paper_queue WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM paper_items WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM papers WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM variants WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM questions WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM submissions WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM lessons WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM units WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM textbooks WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM llm_profiles WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM user_settings WHERE user_id = ?').bind(uid).run();
+  await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(uid).run();
+}
+
 /** 批改一份作业：读图 → 让模型逐题识别/判对错/写错因 → 落库。失败由调用方统一标 error。 */
-async function gradeHomework(env: Env, id: string): Promise<Response> {
-  const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(id).first<any>();
+async function gradeHomework(env: Env, id: string, uid: string): Promise<Response> {
+  const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(id, uid).first<any>();
   if (!sub) throw new HttpError(404, '提交不存在');
   if (sub.status === 'grading' && sub.error_msg) {
     // 上一次失败后重试：清掉旧标记
@@ -776,7 +846,7 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     pics.push({ b64: toBase64(buf), type: contentTypeOf(k) });
   }
   if (!pics.length) throw new HttpError(404, '图片不存在（可能没上传成功），请重新拍照上传。');
-  const s = await getSettings(env);
+  const s = await getSettings(env, uid);
 
   // 批的是组卷答卷：把原卷题目和正确答案一并给模型当校对依据，判分更稳
   let userPrompt = gradeUserPrompt(s.grade);
@@ -799,7 +869,7 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
       userPrompt;
   }
 
-  const text = await llm(env, gradeSystemPrompt(s.grade), userPrompt, {
+  const text = await llm(env, uid, gradeSystemPrompt(s.grade), userPrompt, {
     images: pics,
     temperature: 0.1,
     maxTokens: Math.min(4000 + (pics.length - 1) * 2000, 9000),
@@ -847,12 +917,13 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     }
     await env.DB.prepare(
       `INSERT INTO questions
-       (id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
+       (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
         error_reason, solution, knowledge, page, answer_band, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
       .bind(
         qid,
+        uid,
         id,
         seq,
         String(q.no ?? seq),
@@ -872,7 +943,9 @@ async function gradeHomework(env: Env, id: string): Promise<Response> {
     // 少了它前端会全部退回第 1 页，第 2 页起的题目就挂上第 1 页的截图。
     created.push({ id: qid, seq, band, page: pageNo });
   }
-  await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ?").bind(id).run();
+  await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ? AND user_id = ?")
+    .bind(id, uid)
+    .run();
   return json({ submission_id: id, questions: created });
 }
 
@@ -913,8 +986,8 @@ async function renumberQuestionsByPage(env: Env, subId: string): Promise<void> {
  * 已经人工改判过、做过举一反三、有掌握度记录的题全清掉。家长只是换了第 2 页，
  * 不该动到第 1 页。所以这里只动这一页，新题 seq 接在现有题目后面。
  */
-async function gradePage(env: Env, subId: string, pageId: string): Promise<Response> {
-  const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subId).first<any>();
+async function gradePage(env: Env, subId: string, pageId: string, uid: string): Promise<Response> {
+  const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
   if (!sub) throw new HttpError(404, '提交不存在');
   const pgs = await env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC')
     .bind(subId)
@@ -930,7 +1003,7 @@ async function gradePage(env: Env, subId: string, pageId: string): Promise<Respo
   if (buf.byteLength > 9 * 1024 * 1024) {
     throw new HttpError(413, '这张照片太大了，大模型不接受。请截图或压缩后再传。');
   }
-  const s = await getSettings(env);
+  const s = await getSettings(env, uid);
   const pageNo = idx + 1;
 
   let userPrompt =
@@ -951,7 +1024,7 @@ async function gradePage(env: Env, subId: string, pageId: string): Promise<Respo
     }
   }
 
-  const text = await llm(env, gradeSystemPrompt(s.grade), userPrompt, {
+  const text = await llm(env, uid, gradeSystemPrompt(s.grade), userPrompt, {
     imageBase64: toBase64(buf),
     imageType: contentTypeOf(pageKey),
     temperature: 0.1,
@@ -999,12 +1072,13 @@ async function gradePage(env: Env, subId: string, pageId: string): Promise<Respo
     }
     await env.DB.prepare(
       `INSERT INTO questions
-       (id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
+       (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
         error_reason, solution, knowledge, page, answer_band, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
       .bind(
         qid,
+        uid,
         subId,
         seq,
         String(q.no ?? seq),
@@ -1025,7 +1099,9 @@ async function gradePage(env: Env, subId: string, pageId: string): Promise<Respo
   // 重批这一页后，本页的题 seq 会排在别的页后面（旧题删掉留下的空档），
   // 按「页 → 页内顺序」重排一次，题目列表才不会一页的题分成两段显示。
   await renumberQuestionsByPage(env, subId);
-  await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ?").bind(subId).run();
+  await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ? AND user_id = ?")
+    .bind(subId, uid)
+    .run();
   return json({ submission_id: subId, page: pageNo, questions: created });
 }
 
@@ -1034,15 +1110,138 @@ async function handleApi(
   env: Env,
   p: string,
   url: URL,
+  user: UserRow,
 ): Promise<Response> {
   const method = req.method.toUpperCase();
+  const uid = user.id;
+
+  /* ------------------------------------------------------------ 用户管理 */
+  if (p === '/users' && method === 'GET') {
+    const rows = await env.DB.prepare(
+      `SELECT u.id, u.name, u.avatar, u.sort, u.created_at,
+              (SELECT COUNT(*) FROM questions q WHERE q.user_id = u.id) AS question_count,
+              (SELECT COUNT(*) FROM submissions s WHERE s.user_id = u.id) AS submission_count
+         FROM users u ORDER BY u.sort ASC, u.created_at ASC`,
+    ).all<any>();
+    return json({ users: rows.results || [], current: uid });
+  }
+
+  // 新建用户：可选把现有用户的「大纲结构」和「模型设置」复制一份，省得重新配
+  if (p === '/users' && method === 'POST') {
+    const body = await req.json<any>().catch(() => ({}));
+    const name = String(body.name || '').trim().slice(0, 20);
+    if (!name) throw new HttpError(400, '给这个用户起个名字');
+    const dup = await env.DB.prepare('SELECT id FROM users WHERE name = ?').bind(name).first<any>();
+    if (dup) throw new HttpError(400, `已经有一个叫「${name}」的用户了`);
+    const copyFrom = String(body.copy_from || '').trim(); // 空 = 全部空白
+    const id = `u_${uuid().slice(0, 10)}`;
+    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first<any>();
+    await env.DB.prepare('INSERT INTO users (id, name, avatar, sort, created_at) VALUES (?,?,?,?,?)')
+      .bind(id, name, String(body.avatar || '🙂').slice(0, 4), Number(cnt?.c || 0), now())
+      .run();
+
+    if (copyFrom) {
+      const src = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(copyFrom).first<any>();
+      if (src) {
+        // 1) 模型设置整份复制（API Key 也带上，新用户开箱能用）
+        if (body.copy_settings !== false) {
+          await env.DB.prepare(
+            `INSERT INTO user_settings
+               (user_id, base_url, api_key, model, grade, student_name,
+                text_base_url, text_api_key, text_model,
+                active_vision_profile, active_text_profile, thinking_mode, updated_at)
+             SELECT ?, base_url, api_key, model, grade, student_name,
+                    text_base_url, text_api_key, text_model,
+                    active_vision_profile, active_text_profile, thinking_mode, ?
+               FROM user_settings WHERE user_id = ?`,
+          )
+            .bind(id, now(), copyFrom)
+            .run();
+          // 模型源也复制一份，指向新副本，避免两个用户改同一行
+          const profs = await env.DB.prepare('SELECT * FROM llm_profiles WHERE user_id = ?').bind(copyFrom).all<any>();
+          const map = new Map<string, string>();
+          for (const pr of profs.results || []) {
+            const nid = uuid();
+            map.set(pr.id, nid);
+            await env.DB.prepare(
+              'INSERT INTO llm_profiles (id, user_id, name, base_url, api_key, model, kind, note, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)',
+            )
+              .bind(nid, id, pr.name, pr.base_url, pr.api_key || '', pr.model, pr.kind || 'vision', pr.note || '', now(), now())
+              .run();
+          }
+          const st = await env.DB.prepare('SELECT * FROM user_settings WHERE user_id = ?').bind(id).first<any>();
+          const av = map.get(st?.active_vision_profile || '') || '';
+          const at = map.get(st?.active_text_profile || '') || '';
+          // 学生姓名跟着「这个人」走：抄设置只抄模型/年级，名字必须是新用户自己的
+          await env.DB.prepare(
+            'UPDATE user_settings SET active_vision_profile = ?, active_text_profile = ?, student_name = ? WHERE user_id = ?',
+          )
+            .bind(av, at, name, id)
+            .run();
+        }
+
+        // 2) 大纲结构（教材 → 单元 → 课文），不带任何作业/题目
+        if (body.copy_syllabus !== false) {
+          const tbs = await env.DB.prepare('SELECT * FROM textbooks WHERE user_id = ? ORDER BY sort').bind(copyFrom).all<any>();
+          for (const tb of tbs.results || []) {
+            const ntb = uuid();
+            await env.DB.prepare('INSERT INTO textbooks (id, user_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,?)')
+              .bind(ntb, id, tb.name, tb.sort || 0, tb.is_custom || 0, now())
+              .run();
+            const us = await env.DB.prepare('SELECT * FROM units WHERE textbook_id = ? ORDER BY sort').bind(tb.id).all<any>();
+            for (const un of us.results || []) {
+              const nun = uuid();
+              await env.DB.prepare('INSERT INTO units (id, user_id, textbook_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,?,?)')
+                .bind(nun, id, ntb, un.name, un.sort || 0, un.is_custom || 0, now())
+                .run();
+              const ls = await env.DB.prepare('SELECT * FROM lessons WHERE unit_id = ? ORDER BY sort').bind(un.id).all<any>();
+              for (const le of ls.results || []) {
+                await env.DB.prepare('INSERT INTO lessons (id, user_id, unit_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,?,?)')
+                  .bind(uuid(), id, nun, le.name, le.sort || 0, le.is_custom || 0, now())
+                  .run();
+              }
+            }
+          }
+        }
+      }
+    }
+    return json({ ok: true, id, name });
+  }
+
+  const um = /^\/users\/([^/]+)$/.exec(p);
+  if (um && method === 'PATCH') {
+    const body = await req.json<any>().catch(() => ({}));
+    const target = um[1];
+    const name = body.name === undefined ? null : String(body.name).trim().slice(0, 20);
+    if (name === '') throw new HttpError(400, '名字不能为空');
+    if (name) {
+      const dup = await env.DB.prepare('SELECT id FROM users WHERE name = ? AND id <> ?').bind(name, target).first<any>();
+      if (dup) throw new HttpError(400, `已经有一个叫「${name}」的用户了`);
+    }
+    const r = await env.DB.prepare('UPDATE users SET name = COALESCE(?, name), avatar = COALESCE(?, avatar) WHERE id = ?')
+      .bind(name, body.avatar === undefined ? null : String(body.avatar).slice(0, 4), target)
+      .run();
+    if (!Number(r?.meta?.changes || 0)) throw new HttpError(404, '用户不存在');
+    return json({ ok: true });
+  }
+
+  // 删除用户：连同这个人的全部数据一起删（照片文件留在 R2，不阻塞请求）
+  if (um && method === 'DELETE') {
+    const target = um[1];
+    const total = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first<any>();
+    if (Number(total?.c || 0) <= 1) throw new HttpError(400, '至少要留一个用户');
+    const u = await env.DB.prepare('SELECT id FROM users WHERE id = ?').bind(target).first<any>();
+    if (!u) throw new HttpError(404, '用户不存在');
+    await deleteUserData(env, target);
+    return json({ ok: true });
+  }
 
   /* ---------------------------------------------------------- settings */
   if (p === '/settings' && method === 'GET') {
-    const s = await getSettings(env);
-    await migrateLegacyProfile(env, s);
-    const st2 = await getSettings(env);
-    const profiles = (await listProfiles(env)).map((x) => ({
+    const s = await getSettings(env, uid);
+    await migrateLegacyProfile(env, s, uid);
+    const st2 = await getSettings(env, uid);
+    const profiles = (await listProfiles(env, uid)).map((x) => ({
       id: x.id,
       name: x.name,
       base_url: x.base_url,
@@ -1054,29 +1253,40 @@ async function handleApi(
     return json({
       settings: {
         ...st2,
+        passcode: await getPasscode(env),
         api_key_set: !!st2.api_key,
         api_key: st2.api_key ? '******' : '',
         text_api_key_set: !!st2.text_api_key,
         text_api_key: st2.text_api_key ? '******' : '',
       },
       profiles,
+      // 告诉前端「你正在改的是谁的设置」（设置页会显示出来，避免改错人）
+      user: { id: user.id, name: user.name, avatar: user.avatar },
     });
   }
 
   if (p === '/settings' && method === 'POST') {
     const body = await req.json<any>();
-    const s0 = await getSettings(env);
+    const s0 = await getSettings(env, uid);
     // 视觉 / 文本槽位的表单：如果当前有启用的模型源，就改那条源（而不是覆盖旧列），这样源库里的配置不会互相覆盖
     if (body.base_url !== undefined || body.model !== undefined || body.api_key !== undefined) {
-      const p = await getProfile(env, s0.active_vision_profile);
-      if (p) await saveProfile(env, p.id, { base_url: body.base_url, api_key: body.api_key, model: body.model });
+      const p = await getProfile(env, s0.active_vision_profile, uid);
+      if (p) await saveProfile(env, p.id, { base_url: body.base_url, api_key: body.api_key, model: body.model }, uid);
     }
     if (body.text_base_url !== undefined || body.text_model !== undefined || body.text_api_key !== undefined) {
-      const p = await getProfile(env, s0.active_text_profile);
-      if (p) await saveProfile(env, p.id, { base_url: body.text_base_url, api_key: body.text_api_key, model: body.text_model });
+      const p = await getProfile(env, s0.active_text_profile, uid);
+      if (p) {
+        await saveProfile(env, p.id, { base_url: body.text_base_url, api_key: body.text_api_key, model: body.text_model }, uid);
+      }
     }
+    // 设置行可能还不存在（新用户没复制设置时），用 UPSERT 保证写得进去
     await env.DB.prepare(
-      `UPDATE settings SET
+      `INSERT INTO user_settings (user_id, base_url, api_key, model, text_base_url, text_api_key, text_model,
+                                  grade, student_name, thinking_mode, updated_at)
+       VALUES (?, COALESCE(?, ?), COALESCE(?, ''), COALESCE(?, ?),
+               COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''),
+               COALESCE(?, ?), COALESCE(?, ''), COALESCE(?, 'fast'), ?)
+       ON CONFLICT(user_id) DO UPDATE SET
         base_url = COALESCE(?, base_url),
         api_key = COALESCE(?, api_key),
         model = COALESCE(?, model),
@@ -1085,12 +1295,25 @@ async function handleApi(
         text_model = COALESCE(?, text_model),
         grade = COALESCE(?, grade),
         student_name = COALESCE(?, student_name),
-        passcode = COALESCE(?, passcode),
         thinking_mode = COALESCE(?, thinking_mode),
-        updated_at = ?
-       WHERE id = 1`,
+        updated_at = excluded.updated_at`,
     )
       .bind(
+        uid,
+        body.base_url ?? null,
+        DEFAULT_BASE,
+        body.api_key ?? null,
+        body.model ?? null,
+        DEFAULT_MODEL,
+        body.text_base_url !== undefined ? body.text_base_url : null,
+        body.text_api_key !== undefined ? body.text_api_key : null,
+        body.text_model !== undefined ? body.text_model : null,
+        body.grade ?? null,
+        '一年级',
+        body.student_name ?? null,
+        body.thinking_mode ?? null,
+        now(),
+        // ON CONFLICT 部分
         body.base_url ?? null,
         body.api_key ?? null,
         body.model ?? null,
@@ -1099,18 +1322,25 @@ async function handleApi(
         body.text_model !== undefined ? body.text_model : null,
         body.grade ?? null,
         body.student_name ?? null,
-        body.passcode ?? null,
         body.thinking_mode ?? null,
-        now(),
       )
       .run();
-    const s = await getSettings(env);
+    // 家庭口令是全局的，单独存
+    if (body.passcode !== undefined && body.passcode !== null) {
+      await env.DB.prepare(
+        `INSERT INTO app_config (id, passcode, updated_at) VALUES (1, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET passcode = excluded.passcode, updated_at = excluded.updated_at`,
+      )
+        .bind(String(body.passcode), now())
+        .run();
+    }
+    const s = await getSettings(env, uid);
     return json({ ok: true, settings: { ...s, api_key: s.api_key ? '******' : '' } });
   }
 
   /* -------------------------------------------------------- 模型源库 CRUD */
   if (p === '/profiles' && method === 'GET') {
-    const list = (await listProfiles(env)).map((x) => ({
+    const list = (await listProfiles(env, uid)).map((x) => ({
       id: x.id,
       name: x.name,
       base_url: x.base_url,
@@ -1127,19 +1357,21 @@ async function handleApi(
     if (!body?.base_url || !body?.model) throw new HttpError(400, '接口地址和模型名必填');
     const id = body.id || uuid();
     // 更新已有源时 Key 留空 = 不覆盖旧 Key
-    if (body.id && !body.api_key) {
-      const old = await getProfile(env, body.id);
-      if (old) body.api_key = old.api_key;
+    if (body.id) {
+      const old = await getProfile(env, body.id, uid);
+      if (!old) throw new HttpError(404, '模型源不存在'); // 不能改别人的源
+      if (!body.api_key) body.api_key = old.api_key;
     }
     await env.DB.prepare(
-      `INSERT INTO llm_profiles (id, name, base_url, api_key, model, kind, note, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?)
+      `INSERT INTO llm_profiles (id, user_id, name, base_url, api_key, model, kind, note, created_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name, base_url = excluded.base_url, api_key = excluded.api_key,
          model = excluded.model, kind = excluded.kind, note = excluded.note, updated_at = excluded.updated_at`,
     )
       .bind(
         id,
+        uid,
         body.name || '未命名模型源',
         body.base_url,
         body.api_key || '',
@@ -1150,14 +1382,16 @@ async function handleApi(
         now(),
       )
       .run();
-    const s = await getSettings(env);
+    const s = await getSettings(env, uid);
     // 还没有任何启用的源时，新建的源自动启用到对应槽位
     if (body.kind === 'text') {
       if (!s.active_text_profile) {
-        await env.DB.prepare('UPDATE settings SET active_text_profile = ? WHERE id = 1').bind(id).run();
+        await ensureSettingsRow(env, uid);
+        await env.DB.prepare('UPDATE user_settings SET active_text_profile = ? WHERE user_id = ?').bind(id, uid).run();
       }
     } else if (!s.active_vision_profile) {
-      await env.DB.prepare('UPDATE settings SET active_vision_profile = ? WHERE id = 1').bind(id).run();
+      await ensureSettingsRow(env, uid);
+      await env.DB.prepare('UPDATE user_settings SET active_vision_profile = ? WHERE user_id = ?').bind(id, uid).run();
     }
     return json({ ok: true, id });
   }
@@ -1169,19 +1403,20 @@ async function handleApi(
     if (action === 'activate') {
       const body = await req.json<any>().catch(() => ({}) as any);
       const kind = body.kind === 'text' ? 'text' : 'vision';
-      const prof = await getProfile(env, id);
+      const prof = await getProfile(env, id, uid);
       if (!prof) throw new HttpError(404, '模型源不存在');
       const col = kind === 'text' ? 'active_text_profile' : 'active_vision_profile';
-      await env.DB.prepare(`UPDATE settings SET ${col} = ? WHERE id = 1`).bind(id).run();
+      await ensureSettingsRow(env, uid);
+      await env.DB.prepare(`UPDATE user_settings SET ${col} = ? WHERE user_id = ?`).bind(id, uid).run();
       return json({ ok: true, kind, id });
     }
     if (action === 'test') {
-      const prof = await getProfile(env, id);
+      const prof = await getProfile(env, id, uid);
       if (!prof) throw new HttpError(404, '模型源不存在');
       if (!prof.api_key) throw new HttpError(400, `「${prof.name}」还没有填 API Key，请点「编辑」补上。`);
       const override = { base: prof.base_url, key: prof.api_key, model: prof.model };
       const t0 = Date.now();
-      const text = await llm(env, '你是一个测试助手。', '请只回复两个字：正常', {
+      const text = await llm(env, uid, '你是一个测试助手。', '请只回复两个字：正常', {
         maxTokens: 1024,
         override,
       });
@@ -1189,7 +1424,7 @@ async function handleApi(
       let vision: any = null;
       if (prof.kind !== 'text') {
         try {
-          const v = await llm(env, '你是图片描述助手。', '这张图是什么颜色？只回答颜色词，两个字以内。', {
+          const v = await llm(env, uid, '你是图片描述助手。', '这张图是什么颜色？只回答颜色词，两个字以内。', {
             maxTokens: 1024,
             override,
             imageBase64: TINY_RED_PNG,
@@ -1204,34 +1439,42 @@ async function handleApi(
     }
     // 改某一条源
     const body = await req.json<any>();
-    await saveProfile(env, id, {
-      name: body.name,
-      base_url: body.base_url,
-      api_key: body.api_key,
-      model: body.model,
-      kind: body.kind,
-      note: body.note,
-    });
+    await saveProfile(
+      env,
+      id,
+      {
+        name: body.name,
+        base_url: body.base_url,
+        api_key: body.api_key,
+        model: body.model,
+        kind: body.kind,
+        note: body.note,
+      },
+      uid,
+    );
     return json({ ok: true, id });
   }
 
   if (pm && !pm[2] && method === 'DELETE') {
     const id = pm[1];
-    const s = await getSettings(env);
-    await env.DB.prepare('DELETE FROM llm_profiles WHERE id = ?').bind(id).run();
+    const s = await getSettings(env, uid);
+    // 只能删自己的源
+    const own = await getProfile(env, id, uid);
+    if (!own) throw new HttpError(404, '模型源不存在');
+    await env.DB.prepare('DELETE FROM llm_profiles WHERE id = ? AND user_id = ?').bind(id, uid).run();
     if (s.active_vision_profile === id) {
-      await env.DB.prepare("UPDATE settings SET active_vision_profile = '' WHERE id = 1").run();
+      await env.DB.prepare("UPDATE user_settings SET active_vision_profile = '' WHERE user_id = ?").bind(uid).run();
     }
     if (s.active_text_profile === id) {
-      await env.DB.prepare("UPDATE settings SET active_text_profile = '' WHERE id = 1").run();
+      await env.DB.prepare("UPDATE user_settings SET active_text_profile = '' WHERE user_id = ?").bind(uid).run();
     }
     return json({ ok: true });
   }
 
   if (p === '/unlock' && method === 'POST') {
     const body = await req.json<any>();
-    const s = await getSettings(env);
-    if (!s.passcode || body.passcode === s.passcode) {
+    const passcode = await getPasscode(env);
+    if (!passcode || body.passcode === passcode) {
       return json(
         { ok: true },
         200,
@@ -1242,8 +1485,10 @@ async function handleApi(
   }
 
   if (p === '/settings/need' && method === 'GET') {
-    const s = await getSettings(env);
-    return json({ need_passcode: !!s.passcode, configured: !!s.api_key });
+    // 这个接口在口令校验之前就要能访问，所以配置情况只能看「当前用户」的
+    const passcode = await getPasscode(env);
+    const s = await getSettings(env, uid);
+    return json({ need_passcode: !!passcode, configured: !!s.api_key });
   }
 
   const testModel = async (useText: boolean) => {
@@ -1259,7 +1504,7 @@ async function handleApi(
         : undefined;
     const t0 = Date.now();
     // maxTokens 不能太小：思考型模型（智谱 GLM 等）会先输出 reasoning，额度太小会被截断、正文为空
-    const text = await llm(env, '你是一个测试助手。', '请只回复两个字：正常', {
+    const text = await llm(env, uid, '你是一个测试助手。', '请只回复两个字：正常', {
       maxTokens: 1024,
       text: useText,
       override,
@@ -1286,7 +1531,7 @@ async function handleApi(
     const lessonRaw = form.get('lesson_id');
     const lessonId = lessonRaw ? String(lessonRaw) : null;
     if (lessonId) {
-      const ok = await env.DB.prepare('SELECT id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+      const ok = await env.DB.prepare('SELECT id FROM lessons WHERE id = ? AND user_id = ?').bind(lessonId, uid).first<any>();
       if (!ok) throw new HttpError(400, '所选课文不存在');
     }
     const buf = await file.arrayBuffer();
@@ -1294,7 +1539,9 @@ async function handleApi(
     // 多页作业：带 submission_id 就是往同一份作业上再加一页
     const appendTo = String(form.get('submission_id') || '').trim();
     if (appendTo) {
-      const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ?').bind(appendTo).first<any>();
+      const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?')
+        .bind(appendTo, uid)
+        .first<any>();
       if (!sub) throw new HttpError(404, '这份作业不存在，重新拍一次');
       const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
         .bind(appendTo)
@@ -1315,9 +1562,9 @@ async function handleApi(
     const key = `orig/${id}.${ext}`;
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
     await env.DB.prepare(
-      "INSERT INTO submissions (id, kind, lesson_id, image_key, status, created_at) VALUES (?, 'homework', ?, ?, 'grading', ?)",
+      "INSERT INTO submissions (id, user_id, kind, lesson_id, image_key, status, created_at) VALUES (?,?,'homework',?,?, 'grading', ?)",
     )
-      .bind(id, lessonId, key, now())
+      .bind(id, uid, lessonId, key, now())
       .run();
     await env.DB.prepare(
       'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)',
@@ -1332,11 +1579,11 @@ async function handleApi(
     const id = p.slice('/homework/'.length, -'/grade'.length);
     // 失败时把状态标成 error（否则界面上会永远停在「老师正在批改…」）
     try {
-      return await gradeHomework(env, id);
+      return await gradeHomework(env, id, uid);
     } catch (e: any) {
       const msg = String(e?.message || e).slice(0, 500);
-      await env.DB.prepare("UPDATE submissions SET status = 'error', error_msg = ? WHERE id = ?")
-        .bind(msg, id)
+      await env.DB.prepare("UPDATE submissions SET status = 'error', error_msg = ? WHERE id = ? AND user_id = ?")
+        .bind(msg, id, uid)
         .run()
         .catch(() => {});
       throw e;
@@ -1353,13 +1600,16 @@ async function handleApi(
     // 每次上传都换一个新文件名：图片地址带一年强缓存，用固定 key 覆盖会导致
     // 浏览器 / 边缘节点一直显示旧图（重裁后看不到变化）。换 key 天然破缓存。
     const key = `ans/${qid}-${uuid().slice(0, 8)}.${extOf(file.name)}`;
-    const old = await env.DB.prepare('SELECT answer_image_key FROM questions WHERE id = ?')
-      .bind(qid)
+    const old = await env.DB.prepare('SELECT answer_image_key FROM questions WHERE id = ? AND user_id = ?')
+      .bind(qid, uid)
       .first<any>();
+    if (!old) throw new HttpError(404, '题目不存在');
     await env.IMAGES.put(key, await file.arrayBuffer(), {
       httpMetadata: { contentType: contentTypeOf(key) },
     });
-    await env.DB.prepare('UPDATE questions SET answer_image_key = ? WHERE id = ?').bind(key, qid).run();
+    await env.DB.prepare('UPDATE questions SET answer_image_key = ? WHERE id = ? AND user_id = ?')
+      .bind(key, qid, uid)
+      .run();
     if (old?.answer_image_key && old.answer_image_key !== key) {
       try {
         await env.IMAGES.delete(old.answer_image_key);
@@ -1385,8 +1635,8 @@ async function handleApi(
        -- 组卷可能只挂了单元（没选课文），单元要从 submissions.unit_id 兜底
        LEFT JOIN units u ON u.id = COALESCE(l.unit_id, s.unit_id)
        LEFT JOIN textbooks t ON t.id = COALESCE(u.textbook_id, s.textbook_id)
-       WHERE 1=1`;
-    const binds: any[] = [];
+       WHERE q.user_id = ?`;
+    const binds: any[] = [uid];
     const qLesson = (url.searchParams.get('lesson') || '').trim();
     const qUnit = (url.searchParams.get('unit') || '').trim();
     const qTb = (url.searchParams.get('textbook') || '').trim();
@@ -1422,8 +1672,11 @@ async function handleApi(
     if (!ids.length) throw new HttpError(400, '先勾选要删除的错题');
     const affected = new Set<string>();
     for (const id of ids) {
-      const q = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ?').bind(id).first<any>();
-      if (q?.submission_id) affected.add(q.submission_id);
+      const q = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ? AND user_id = ?')
+        .bind(id, uid)
+        .first<any>();
+      if (!q) continue;
+      if (q.submission_id) affected.add(q.submission_id);
       await deleteQuestion(env, id);
     }
     // 某份作业的题被删光了，整份作业也清掉
@@ -1444,7 +1697,9 @@ async function handleApi(
     const val = body.is_correct ? 1 : 0;
     let n = 0;
     for (const qid of ids) {
-      const r = await env.DB.prepare('UPDATE questions SET is_correct = ? WHERE id = ?').bind(val, qid).run();
+      const r = await env.DB.prepare('UPDATE questions SET is_correct = ? WHERE id = ? AND user_id = ?')
+        .bind(val, qid, uid)
+        .run();
       n += Number(r.meta?.changes || 0) > 0 ? 1 : 0;
     }
     return json({ ok: true, updated: n });
@@ -1469,7 +1724,7 @@ async function handleApi(
          LEFT JOIN lessons l ON l.id = s.lesson_id
          LEFT JOIN units u ON u.id = l.unit_id
          LEFT JOIN textbooks t ON t.id = u.textbook_id
-        WHERE pq.question_id IS NOT NULL
+        WHERE pq.user_id = ? AND pq.question_id IS NOT NULL
         UNION ALL
        SELECT pq.id, pq.created_at, 'variant',
               v.id, v.seq, v.stem, v.answer,
@@ -1484,9 +1739,11 @@ async function handleApi(
          LEFT JOIN lessons l ON l.id = s.lesson_id
          LEFT JOIN units u ON u.id = l.unit_id
          LEFT JOIN textbooks t ON t.id = u.textbook_id
-        WHERE pq.variant_id IS NOT NULL
+        WHERE pq.user_id = ? AND pq.variant_id IS NOT NULL
         ORDER BY queued_at ASC, queue_id ASC`,
-    ).all<any>();
+    )
+      .bind(uid, uid)
+      .all<any>();
     return json({ items: rows.results || [] });
   }
 
@@ -1502,27 +1759,27 @@ async function handleApi(
     }
     let added = 0;
     for (const qid of qIds) {
-      const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ?').bind(qid).first<any>();
+      const q = await env.DB.prepare('SELECT id FROM questions WHERE id = ? AND user_id = ?').bind(qid, uid).first<any>();
       if (!q) continue;
       // 部分唯一索引：同一道题反复加也只排一次
       const r = await env.DB.prepare(
-        'INSERT OR IGNORE INTO paper_queue (id, question_id, variant_id, created_at) VALUES (?,?,NULL,?)',
+        'INSERT OR IGNORE INTO paper_queue (id, user_id, question_id, variant_id, created_at) VALUES (?,?,?,NULL,?)',
       )
-        .bind(uuid(), qid, now())
+        .bind(uuid(), uid, qid, now())
         .run();
       if (Number(r?.meta?.changes || 0) > 0) added += 1;
     }
     for (const vid of vIds) {
-      const v = await env.DB.prepare('SELECT id FROM variants WHERE id = ?').bind(vid).first<any>();
+      const v = await env.DB.prepare('SELECT id FROM variants WHERE id = ? AND user_id = ?').bind(vid, uid).first<any>();
       if (!v) continue;
       const r = await env.DB.prepare(
-        'INSERT OR IGNORE INTO paper_queue (id, question_id, variant_id, created_at) VALUES (?,NULL,?,?)',
+        'INSERT OR IGNORE INTO paper_queue (id, user_id, question_id, variant_id, created_at) VALUES (?,?,NULL,?,?)',
       )
-        .bind(uuid(), vid, now())
+        .bind(uuid(), uid, vid, now())
         .run();
       if (Number(r?.meta?.changes || 0) > 0) added += 1;
     }
-    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_queue').first<any>();
+    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_queue WHERE user_id = ?').bind(uid).first<any>();
     return json({ ok: true, added, skipped: qIds.length + vIds.length - added, total: Number(cnt?.c || 0) });
   }
 
@@ -1530,7 +1787,7 @@ async function handleApi(
   if (p === '/paper-queue' && method === 'DELETE') {
     const body = await req.json<any>().catch(() => ({}));
     if (body.all) {
-      const r = await env.DB.prepare('DELETE FROM paper_queue').run();
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE user_id = ?').bind(uid).run();
       return json({ ok: true, removed: Number(r?.meta?.changes || 0) });
     }
     const qIds: string[] = Array.isArray(body.question_ids) ? body.question_ids.map(String) : [];
@@ -1538,11 +1795,15 @@ async function handleApi(
     if (!qIds.length && !vIds.length) throw new HttpError(400, '没有收到要移出的题目');
     let removed = 0;
     for (const qid of qIds) {
-      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(qid).run();
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ? AND user_id = ?')
+        .bind(qid, uid)
+        .run();
       removed += Number(r?.meta?.changes || 0);
     }
     for (const vid of vIds) {
-      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(vid).run();
+      const r = await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ? AND user_id = ?')
+        .bind(vid, uid)
+        .run();
       removed += Number(r?.meta?.changes || 0);
     }
     return json({ ok: true, removed });
@@ -1560,8 +1821,11 @@ async function handleApi(
          LEFT JOIN units u ON u.id = p.unit_id
          LEFT JOIN lessons l ON l.id = p.lesson_id
          LEFT JOIN submissions s ON s.id = p.submission_id
+        WHERE p.user_id = ?
         ORDER BY p.created_at DESC LIMIT 50`,
-    ).all<any>();
+    )
+      .bind(uid)
+      .all<any>();
     return json({ papers: rows.results || [] });
   }
 
@@ -1585,7 +1849,7 @@ async function handleApi(
     const withOriginal =
       mode === 'variant' && !(body.include_original === false || body.include_original === 0 || body.include_original === '0');
     const ordered = body.ordered === false || body.ordered === 0 ? 0 : 1;
-    const s = await getSettings(env);
+    const s = await getSettings(env, uid);
 
     // 母题 / 变式题先统一成「出题种子」：后面不管是拼原题还是举一反三，都只认这组字段
     const qs: any[] = [];
@@ -1598,9 +1862,9 @@ async function handleApi(
         const v = await env.DB.prepare(
           `SELECT v.*, q.no AS parent_no, q.knowledge AS parent_knowledge
              FROM variants v JOIN questions q ON q.id = v.parent_id
-            WHERE v.id = ?`,
+            WHERE v.id = ? AND v.user_id = ?`,
         )
-          .bind(it.id)
+          .bind(it.id, uid)
           .first<any>();
         if (!v) continue;
         qs.push({
@@ -1616,7 +1880,7 @@ async function handleApi(
           error_reason: '',
         });
       } else {
-        const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(it.id).first<any>();
+        const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(it.id, uid).first<any>();
         if (!q) continue;
         qs.push({
           kind: 'question',
@@ -1638,16 +1902,20 @@ async function handleApi(
     // 归属：教材必选，单元 / 课文可选（没选课文时单元也要落到 papers 上，否则会被归到「未指定单元」）
     const tbId = String(body.textbook_id || '').trim();
     if (!tbId) throw new HttpError(400, '先选这张卷子属于哪本教材');
-    const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ?').bind(tbId).first<any>();
+    const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ? AND user_id = ?').bind(tbId, uid).first<any>();
     if (!tb) throw new HttpError(400, '所选教材不存在');
     let lessonId: string | null = String(body.lesson_id || '').trim() || null;
     let unitId: string | null = String(body.unit_id || '').trim() || null;
     if (lessonId) {
-      const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+      const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ? AND user_id = ?')
+        .bind(lessonId, uid)
+        .first<any>();
       if (!ls) throw new HttpError(400, '所选课文不存在');
       if (!unitId) unitId = ls.unit_id || null;
     } else if (unitId) {
-      const un = await env.DB.prepare('SELECT id, textbook_id FROM units WHERE id = ?').bind(unitId).first<any>();
+      const un = await env.DB.prepare('SELECT id, textbook_id FROM units WHERE id = ? AND user_id = ?')
+        .bind(unitId, uid)
+        .first<any>();
       if (!un) throw new HttpError(400, '所选单元不存在');
       if (String(un.textbook_id || '') !== tbId) throw new HttpError(400, '所选单元不属于这本教材');
     }
@@ -1676,6 +1944,7 @@ async function handleApi(
       }
       const text = await llm(
         env,
+        uid,
         paperSystemPrompt(s.grade),
         paperUserPrompt(
           qs.map((q, i) => ({
@@ -1752,31 +2021,44 @@ async function handleApi(
     const title =
       String(body.title || '').trim() || (mode === 'original' ? `原题练习卷 ${md}` : `练习卷 ${md}`);
     await env.DB.prepare(
-      `INSERT INTO papers (id, title, ordered, status, mode, include_original, per_question,
+      `INSERT INTO papers (id, user_id, title, ordered, status, mode, include_original, per_question,
                            textbook_id, unit_id, lesson_id, created_at, updated_at)
-       VALUES (?, ?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(paperId, title.slice(0, 60), ordered, mode, withOriginal ? 1 : 0, per, tbId, unitId, lessonId, nowIso, nowIso)
+      .bind(
+        paperId,
+        uid,
+        title.slice(0, 60),
+        ordered,
+        mode,
+        withOriginal ? 1 : 0,
+        per,
+        tbId,
+        unitId,
+        lessonId,
+        nowIso,
+        nowIso,
+      )
       .run();
 
     // 卷子本质也是一份作业：立刻建一条 status=pending（未作答）的记录，
     // 这样它同时出现在「组卷」板块和作业列表里，打印做完直接拍照交就能批改。
     const subId = uuid();
     await env.DB.prepare(
-      `INSERT INTO submissions (id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
-       VALUES (?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
+      `INSERT INTO submissions (id, user_id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
+       VALUES (?, ?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
     )
-      .bind(subId, lessonId, unitId, tbId, paperId, nowIso)
+      .bind(subId, uid, lessonId, unitId, tbId, paperId, nowIso)
       .run();
-    await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ?').bind(subId, paperId).run();
+    await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ? AND user_id = ?').bind(subId, paperId, uid).run();
 
     for (let i = 0; i < rows.length; i++) {
       const r = rows[i];
       await env.DB.prepare(
-        `INSERT INTO paper_items (id, paper_id, pos, stem, answer, solution, difficulty, knowledge, source_question_id, source_no, created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO paper_items (id, user_id, paper_id, pos, stem, answer, solution, difficulty, knowledge, source_question_id, source_no, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       )
-        .bind(uuid(), paperId, i, r.stem, r.answer, r.solution, r.difficulty, r.knowledge, r.srcId, r.srcNo, nowIso)
+        .bind(uuid(), uid, paperId, i, r.stem, r.answer, r.solution, r.difficulty, r.knowledge, r.srcId, r.srcNo, nowIso)
         .run();
     }
 
@@ -1786,8 +2068,8 @@ async function handleApi(
       for (const q of qs) {
         const r =
           q.kind === 'variant'
-            ? await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(q.id).run()
-            : await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ?').bind(q.id).run();
+            ? await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ? AND user_id = ?').bind(q.id, uid).run()
+            : await env.DB.prepare('DELETE FROM paper_queue WHERE question_id = ? AND user_id = ?').bind(q.id, uid).run();
         removedFromQueue += Number(r?.meta?.changes || 0);
       }
     }
@@ -1797,8 +2079,7 @@ async function handleApi(
   if (p.startsWith('/papers/') && method === 'GET') {
     const pid = p.slice('/papers/'.length);
     if (pid.includes('/')) return null;
-    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
-    if (!paper) throw new HttpError(404, '卷子不存在');
+    const paper = await ownPaper(env, pid, uid);
     const items = await env.DB.prepare('SELECT * FROM paper_items WHERE paper_id = ? ORDER BY pos ASC, created_at ASC')
       .bind(pid)
       .all<any>();
@@ -1833,8 +2114,9 @@ async function handleApi(
     const body = await req.json<any>().catch(() => ({}));
     const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
     if (!ids.length) throw new HttpError(400, '先勾选要删掉的题');
+    await ownPaper(env, pid, uid);
     for (const id of ids) {
-      await env.DB.prepare('DELETE FROM paper_items WHERE id = ? AND paper_id = ?').bind(id, pid).run();
+      await env.DB.prepare('DELETE FROM paper_items WHERE id = ? AND paper_id = ? AND user_id = ?').bind(id, pid, uid).run();
     }
     await renumberPaper(env, pid);
     return json({ ok: true });
@@ -1846,9 +2128,10 @@ async function handleApi(
     const body = await req.json<any>().catch(() => ({}));
     const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
     if (!ids.length) throw new HttpError(400, '没有收到新顺序');
+    await ownPaper(env, pid, uid);
     for (let i = 0; i < ids.length; i++) {
-      await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ? AND paper_id = ?')
-        .bind(i, ids[i], pid)
+      await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ? AND paper_id = ? AND user_id = ?')
+        .bind(i, ids[i], pid, uid)
         .run();
     }
     return json({ ok: true });
@@ -1857,12 +2140,15 @@ async function handleApi(
   // 一键乱序
   if (p.startsWith('/papers/') && p.endsWith('/shuffle') && method === 'POST') {
     const pid = p.slice('/papers/'.length, -'/shuffle'.length);
+    await ownPaper(env, pid, uid);
     const rows = await env.DB.prepare('SELECT id FROM paper_items WHERE paper_id = ? ORDER BY pos ASC').bind(pid).all<any>();
     const ids = shuffleInPlace((rows.results || []).map((r: any) => r.id));
     for (let i = 0; i < ids.length; i++) {
       await env.DB.prepare('UPDATE paper_items SET pos = ? WHERE id = ? AND paper_id = ?').bind(i, ids[i], pid).run();
     }
-    await env.DB.prepare("UPDATE papers SET ordered = 0, updated_at = ? WHERE id = ?").bind(now(), pid).run();
+    await env.DB.prepare("UPDATE papers SET ordered = 0, updated_at = ? WHERE id = ? AND user_id = ?")
+      .bind(now(), pid, uid)
+      .run();
     return json({ ok: true });
   }
 
@@ -1870,8 +2156,7 @@ async function handleApi(
   // 并立刻生成一条作业记录（status=pending = 未作答），这样它马上出现在作业列表里。
   if (p.startsWith('/papers/') && p.endsWith('/finalize') && method === 'POST') {
     const pid = p.slice('/papers/'.length, -'/finalize'.length);
-    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
-    if (!paper) throw new HttpError(404, '卷子不存在');
+    const paper = await ownPaper(env, pid, uid);
     const body = await req.json<any>().catch(() => ({}));
     const title = String(body.title || '').trim();
 
@@ -1879,12 +2164,14 @@ async function handleApi(
       // 第一次确认：教材必选
       const tbId = String(body.textbook_id || '').trim();
       if (!tbId) throw new HttpError(400, '先选这本卷子属于哪本教材');
-      const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ?').bind(tbId).first<any>();
+      const tb = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ? AND user_id = ?').bind(tbId, uid).first<any>();
       if (!tb) throw new HttpError(400, '所选教材不存在');
       let lessonId: string | null = String(body.lesson_id || '').trim() || null;
       let unitId: string | null = String(body.unit_id || '').trim() || null;
       if (lessonId) {
-        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ? AND user_id = ?')
+          .bind(lessonId, uid)
+          .first<any>();
         if (!ls) throw new HttpError(400, '所选课文不存在');
         if (!unitId) unitId = ls.unit_id || null;
       } else {
@@ -1899,28 +2186,28 @@ async function handleApi(
       if (!subId) {
         subId = uuid();
         await env.DB.prepare(
-          `INSERT INTO submissions (id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
-           VALUES (?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
+          `INSERT INTO submissions (id, user_id, kind, lesson_id, unit_id, textbook_id, paper_id, status, created_at)
+           VALUES (?, ?, 'paper', ?, ?, ?, ?, 'pending', ?)`,
         )
-          .bind(subId, lessonId, unitId, tbId, pid, now())
+          .bind(subId, uid, lessonId, unitId, tbId, pid, now())
           .run();
       } else {
-        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ?')
-          .bind(lessonId, unitId, tbId, subId)
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ? AND user_id = ?')
+          .bind(lessonId, unitId, tbId, subId, uid)
           .run();
       }
       await env.DB.prepare(
-        'UPDATE papers SET status = ?, title = ?, textbook_id = ?, unit_id = ?, lesson_id = ?, submission_id = ?, updated_at = ? WHERE id = ?',
+        'UPDATE papers SET status = ?, title = ?, textbook_id = ?, unit_id = ?, lesson_id = ?, submission_id = ?, updated_at = ? WHERE id = ? AND user_id = ?',
       )
-        .bind('final', title ? title.slice(0, 60) : paper.title, tbId, unitId, lessonId, subId, now(), pid)
+        .bind('final', title ? title.slice(0, 60) : paper.title, tbId, unitId, lessonId, subId, now(), pid, uid)
         .run();
       return json({ ok: true, submission_id: subId });
     }
 
     // 已经确认过：只允许改标题 / 改归类
     if (title) {
-      await env.DB.prepare('UPDATE papers SET title = ?, updated_at = ? WHERE id = ?')
-        .bind(title.slice(0, 60), now(), pid)
+      await env.DB.prepare('UPDATE papers SET title = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+        .bind(title.slice(0, 60), now(), pid, uid)
         .run();
     }
     if ('textbook_id' in body || 'lesson_id' in body || 'unit_id' in body) {
@@ -1929,16 +2216,18 @@ async function handleApi(
       let lessonId: string | null = String(body.lesson_id || '').trim() || null;
       let unitId: string | null = String(body.unit_id || '').trim() || null;
       if (lessonId) {
-        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ?').bind(lessonId).first<any>();
+        const ls = await env.DB.prepare('SELECT id, unit_id FROM lessons WHERE id = ? AND user_id = ?')
+          .bind(lessonId, uid)
+          .first<any>();
         if (!ls) throw new HttpError(400, '所选课文不存在');
         if (!unitId) unitId = ls.unit_id || null;
       }
-      await env.DB.prepare('UPDATE papers SET textbook_id = ?, unit_id = ?, lesson_id = ?, updated_at = ? WHERE id = ?')
-        .bind(tbId, unitId, lessonId, now(), pid)
+      await env.DB.prepare('UPDATE papers SET textbook_id = ?, unit_id = ?, lesson_id = ?, updated_at = ? WHERE id = ? AND user_id = ?')
+        .bind(tbId, unitId, lessonId, now(), pid, uid)
         .run();
       if (paper.submission_id) {
-        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ?')
-          .bind(lessonId, unitId, tbId, paper.submission_id)
+        await env.DB.prepare('UPDATE submissions SET lesson_id = ?, unit_id = ?, textbook_id = ? WHERE id = ? AND user_id = ?')
+          .bind(lessonId, unitId, tbId, paper.submission_id, uid)
           .run();
       }
     }
@@ -1947,19 +2236,18 @@ async function handleApi(
 
   if (p.startsWith('/papers/') && method === 'DELETE') {
     const pid = p.slice('/papers/'.length);
-    const pp = await env.DB.prepare('SELECT submission_id FROM papers WHERE id = ?').bind(pid).first<any>();
+    const pp = await ownPaper(env, pid, uid);
     if (pp?.submission_id) await deleteSubmission(env, String(pp.submission_id));
-    await env.DB.prepare('DELETE FROM submissions WHERE paper_id = ?').bind(pid).run();
-    await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ?').bind(pid).run();
-    await env.DB.prepare('DELETE FROM papers WHERE id = ?').bind(pid).run();
+    await env.DB.prepare('DELETE FROM submissions WHERE paper_id = ? AND user_id = ?').bind(pid, uid).run();
+    await env.DB.prepare('DELETE FROM paper_items WHERE paper_id = ? AND user_id = ?').bind(pid, uid).run();
+    await env.DB.prepare('DELETE FROM papers WHERE id = ? AND user_id = ?').bind(pid, uid).run();
     return json({ ok: true });
   }
 
   // 提交卷子答案：把拍下来的答卷挂到「确认组卷」时生成的那条作业记录上，再走正常批改
   if (p.startsWith('/papers/') && p.endsWith('/answer') && method === 'POST') {
     const pid = p.slice('/papers/'.length, -'/answer'.length);
-    const paper = await env.DB.prepare('SELECT * FROM papers WHERE id = ?').bind(pid).first<any>();
-    if (!paper) throw new HttpError(404, '卷子不存在');
+    const paper = await ownPaper(env, pid, uid);
     const form = await req.formData();
     const file = form.get('file') as File | null;
     if (!file) throw new HttpError(400, '没有收到图片');
@@ -1981,18 +2269,18 @@ async function handleApi(
       // 兜底：万一卷子没走确认流程，这里补一条作业记录
       subId = uuid();
       await env.DB.prepare(
-        `INSERT INTO submissions (id, kind, lesson_id, textbook_id, paper_id, status, created_at)
-         VALUES (?, 'paper', ?, ?, ?, 'grading', ?)`,
+        `INSERT INTO submissions (id, user_id, kind, lesson_id, textbook_id, paper_id, status, created_at)
+         VALUES (?, ?, 'paper', ?, ?, ?, 'grading', ?)`,
       )
-        .bind(subId, paper.lesson_id || null, paper.textbook_id || null, pid, now())
+        .bind(subId, uid, paper.lesson_id || null, paper.textbook_id || null, pid, now())
         .run();
-      await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ?').bind(subId, pid).run();
+      await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ? AND user_id = ?').bind(subId, pid, uid).run();
     }
 
     const key = `orig/${subId}.${ext}`;
     await env.IMAGES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: contentTypeOf(key) } });
-    await env.DB.prepare("UPDATE submissions SET image_key = ?, status = 'grading', error_msg = NULL WHERE id = ?")
-      .bind(key, subId)
+    await env.DB.prepare("UPDATE submissions SET image_key = ?, status = 'grading', error_msg = NULL WHERE id = ? AND user_id = ?")
+      .bind(key, subId, uid)
       .run();
     await env.DB.prepare('DELETE FROM submission_pages WHERE submission_id = ?').bind(subId).run();
     await env.DB.prepare(
@@ -2024,8 +2312,8 @@ async function handleApi(
        LEFT JOIN textbooks st ON st.id = COALESCE(s.textbook_id, su.textbook_id)
        LEFT JOIN textbooks pt ON pt.id = s.textbook_id
        LEFT JOIN papers pp ON pp.id = s.paper_id
-       WHERE s.kind IN ('homework','paper')`;
-    const binds: any[] = [];
+       WHERE s.user_id = ? AND s.kind IN ('homework','paper')`;
+    const binds: any[] = [uid];
     if (lessonId === '__none') {
       // 只看「没归类」的作业
       sql += ' AND s.lesson_id IS NULL';
@@ -2105,7 +2393,7 @@ async function handleApi(
   // 加一页（追加到末尾）
   if (subPagesMatch && method === 'POST') {
     const subId = subPagesMatch[1];
-    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subId).first<any>();
+    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
     if (!sub) throw new HttpError(404, '这份作业不存在，刷新一下再试');
     const { buf, ext } = await readImageForm(req);
     const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
@@ -2130,6 +2418,8 @@ async function handleApi(
   if (subPageMatch && method === 'PUT') {
     const subId = subPageMatch[1];
     const pageId = subPageMatch[2];
+    const own = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
+    if (!own) throw new HttpError(404, '这份作业不存在，刷新一下再试');
     const pg = await env.DB.prepare('SELECT * FROM submission_pages WHERE id = ? AND submission_id = ?')
       .bind(pageId, subId)
       .first<any>();
@@ -2150,6 +2440,8 @@ async function handleApi(
   if (subPageMatch && method === 'DELETE') {
     const subId = subPageMatch[1];
     const pageId = subPageMatch[2];
+    const own = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
+    if (!own) throw new HttpError(404, '这份作业不存在，刷新一下再试');
     const keepRaw = String(url.searchParams.get('keep') || '').toLowerCase();
     const keep = keepRaw === '1' || keepRaw === 'true' || keepRaw === 'yes';
 
@@ -2205,12 +2497,12 @@ async function handleApi(
 
   // 只重批某一页
   if (subPageGradeMatch && method === 'POST') {
-    return gradePage(env, subPageGradeMatch[1], subPageGradeMatch[2]);
+    return gradePage(env, subPageGradeMatch[1], subPageGradeMatch[2], uid);
   }
 
   const subMatch = /^\/submissions\/([a-z0-9]+)$/.exec(p);
   if (subMatch && method === 'GET') {
-    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ?').bind(subMatch[1]).first<any>();
+    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subMatch[1], uid).first<any>();
     if (!sub) throw new HttpError(404, '提交不存在');
     const qs = await env.DB.prepare('SELECT * FROM questions WHERE submission_id = ? ORDER BY seq ASC')
       .bind(sub.id)
@@ -2235,7 +2527,7 @@ async function handleApi(
 
   const qMatch = /^\/questions\/([a-z0-9]+)$/.exec(p);
   if (qMatch && method === 'GET') {
-    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(qMatch[1]).first<any>();
+    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(qMatch[1], uid).first<any>();
     if (!q) throw new HttpError(404, '题目不存在');
     return json({ question: await questionWithMastery(env, q) });
   }
@@ -2243,7 +2535,7 @@ async function handleApi(
   // 手动改判母题（对错 / 内容）
   if (qMatch && method === 'PATCH') {
     const body = await req.json<any>();
-    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(qMatch[1]).first<any>();
+    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(qMatch[1], uid).first<any>();
     if (!q) throw new HttpError(404, '题目不存在');
     await env.DB.prepare(
       `UPDATE questions SET
@@ -2254,7 +2546,7 @@ async function handleApi(
         error_reason = COALESCE(?, error_reason),
         solution = COALESCE(?, solution),
         knowledge = COALESCE(?, knowledge)
-       WHERE id = ?`,
+       WHERE id = ? AND user_id = ?`,
     )
       .bind(
         body.is_correct === undefined ? null : body.is_correct ? 1 : 0,
@@ -2265,15 +2557,18 @@ async function handleApi(
         body.solution ?? null,
         body.knowledge ?? null,
         qMatch[1],
+        uid,
       )
       .run();
-    const updated = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(qMatch[1]).first<any>();
+    const updated = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(qMatch[1], uid).first<any>();
     return json({ question: await questionWithMastery(env, updated) });
   }
 
   if (qMatch && method === 'DELETE') {
-    const row = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ?').bind(qMatch[1]).first<any>();
-    await deleteQuestion(env, qMatch[1]);
+    const row = await env.DB.prepare('SELECT submission_id FROM questions WHERE id = ? AND user_id = ?')
+      .bind(qMatch[1], uid)
+      .first<any>();
+    if (row) await deleteQuestion(env, qMatch[1]);
     if (row?.submission_id) await pruneEmptySubmission(env, row.submission_id);
     return json({ ok: true });
   }
@@ -2285,12 +2580,13 @@ async function handleApi(
     const parentId = m[1];
     const body = await req.json<any>().catch(() => ({}));
     const count = Math.min(Math.max(Number(body.count) || 6, 1), 12);
-    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(parentId).first<any>();
+    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(parentId, uid).first<any>();
     if (!q) throw new HttpError(404, '题目不存在');
-    const s = await getSettings(env);
+    const s = await getSettings(env, uid);
 
     const text = await llm(
       env,
+      uid,
       variantsSystemPrompt(s.grade),
       variantsUserPrompt(
         q.stem,
@@ -2320,11 +2616,12 @@ async function handleApi(
       seq += 1;
       const id = uuid();
       await env.DB.prepare(
-        `INSERT INTO variants (id, parent_id, seq, stem, answer, solution, difficulty, selected, status, created_at)
-         VALUES (?,?,?,?,?,?,?,0,'pending',?)`,
+        `INSERT INTO variants (id, user_id, parent_id, seq, stem, answer, solution, difficulty, selected, status, created_at)
+         VALUES (?,?,?,?,?,?,?,?,0,'pending',?)`,
       )
         .bind(
           id,
+          uid,
           parentId,
           seq,
           String(v.stem ?? ''),
@@ -2360,10 +2657,10 @@ async function handleApi(
     const ids: string[] = Array.isArray(body.ids) ? body.ids : [];
     const parentId = body.parent_id;
     if (parentId) {
-      await env.DB.prepare('UPDATE variants SET selected = 0 WHERE parent_id = ?').bind(parentId).run();
+      await env.DB.prepare('UPDATE variants SET selected = 0 WHERE parent_id = ? AND user_id = ?').bind(parentId, uid).run();
     }
     for (const id of ids) {
-      await env.DB.prepare('UPDATE variants SET selected = 1 WHERE id = ?').bind(id).run();
+      await env.DB.prepare('UPDATE variants SET selected = 1 WHERE id = ? AND user_id = ?').bind(id, uid).run();
     }
     return json({ ok: true });
   }
@@ -2372,12 +2669,12 @@ async function handleApi(
   const vMatch = /^\/variants\/([a-z0-9]+)$/.exec(p);
   if (vMatch && method === 'PATCH') {
     const body = await req.json<any>();
-    const v = await env.DB.prepare('SELECT * FROM variants WHERE id = ?').bind(vMatch[1]).first<any>();
+    const v = await env.DB.prepare('SELECT * FROM variants WHERE id = ? AND user_id = ?').bind(vMatch[1], uid).first<any>();
     if (!v) throw new HttpError(404, '题目不存在');
     const status = body.status ?? v.status;
     await env.DB.prepare(
       `UPDATE variants SET status = ?, student_answer = COALESCE(?, student_answer),
-       comment = COALESCE(?, comment), done_at = ? WHERE id = ?`,
+       comment = COALESCE(?, comment), done_at = ? WHERE id = ? AND user_id = ?`,
     )
       .bind(
         status,
@@ -2385,14 +2682,17 @@ async function handleApi(
         body.comment ?? null,
         status === 'pending' ? null : v.done_at || now(),
         vMatch[1],
+        uid,
       )
       .run();
     return json({ ok: true });
   }
 
   if (vMatch && method === 'DELETE') {
-    await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ?').bind(vMatch[1]).run();
-    await env.DB.prepare('DELETE FROM variants WHERE id = ?').bind(vMatch[1]).run();
+    const own = await env.DB.prepare('SELECT id FROM variants WHERE id = ? AND user_id = ?').bind(vMatch[1], uid).first<any>();
+    if (!own) throw new HttpError(404, '题目不存在');
+    await env.DB.prepare('DELETE FROM paper_queue WHERE variant_id = ? AND user_id = ?').bind(vMatch[1], uid).run();
+    await env.DB.prepare('DELETE FROM variants WHERE id = ? AND user_id = ?').bind(vMatch[1], uid).run();
     return json({ ok: true });
   }
 
@@ -2400,7 +2700,7 @@ async function handleApi(
   if (/^\/questions\/([a-z0-9]+)\/variant-answer$/.test(p) && method === 'POST') {
     const m = /^\/questions\/([a-z0-9]+)\/variant-answer$/.exec(p)!;
     const parentId = m[1];
-    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(parentId).first<any>();
+    const q = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(parentId, uid).first<any>();
     if (!q) throw new HttpError(404, '母题不存在');
     const form = await req.formData();
     const file = form.get('file') as File | null;
@@ -2421,9 +2721,10 @@ async function handleApi(
     const buf = await file.arrayBuffer();
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
 
-    const s = await getSettings(env);
+    const s = await getSettings(env, uid);
     const text = await llm(
       env,
+      uid,
       variantGradeSystemPrompt(s.grade),
       variantGradeUserPrompt(
         pool.map((v) => ({ id: v.id, label: `${v.seq}`, stem: v.stem })),
@@ -2451,9 +2752,9 @@ async function handleApi(
       if (!target) continue;
       const ok = !!r.is_correct;
       await env.DB.prepare(
-        `UPDATE variants SET status = ?, student_answer = ?, comment = ?, attempt_image_key = ?, done_at = ?, selected = 1 WHERE id = ?`,
+        `UPDATE variants SET status = ?, student_answer = ?, comment = ?, attempt_image_key = ?, done_at = ?, selected = 1 WHERE id = ? AND user_id = ?`,
       )
-        .bind(ok ? 'correct' : 'wrong', String(r.student_answer ?? ''), String(r.comment ?? ''), key, now(), target.id)
+        .bind(ok ? 'correct' : 'wrong', String(r.student_answer ?? ''), String(r.comment ?? ''), key, now(), target.id, uid)
         .run();
       graded.push({ ...target, status: ok ? 'correct' : 'wrong', student_answer: String(r.student_answer ?? ''), comment: String(r.comment ?? ''), attempt_image_key: key });
     }
@@ -2462,12 +2763,12 @@ async function handleApi(
     }
 
     await env.DB.prepare(
-      "INSERT INTO submissions (id, kind, parent_id, image_key, status, created_at) VALUES (?, 'variant', ?, ?, 'graded', ?)",
+      "INSERT INTO submissions (id, user_id, kind, parent_id, image_key, status, created_at) VALUES (?, ?, 'variant', ?, ?, 'graded', ?)",
     )
-      .bind(subId, parentId, key, now())
+      .bind(subId, uid, parentId, key, now())
       .run();
 
-    const updated = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(parentId).first<any>();
+    const updated = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?').bind(parentId, uid).first<any>();
     return json({ question: await questionWithMastery(env, updated), graded });
   }
 
@@ -2487,7 +2788,7 @@ async function handleApi(
 
   /* ------------------------------------------------- 教材大纲（教材 / 单元 / 课文） */
   if (p === '/textbooks' && method === 'GET') {
-    const rows = await env.DB.prepare('SELECT * FROM textbooks ORDER BY sort, name').all<any>();
+    const rows = await env.DB.prepare('SELECT * FROM textbooks WHERE user_id = ? ORDER BY sort, name').bind(uid).all<any>();
     const list = rows.results || [];
     const withCount = await Promise.all(
       list.map(async (t) => {
@@ -2505,31 +2806,35 @@ async function handleApi(
     const name = String(body?.name || '').trim();
     if (!name) throw new HttpError(400, '教材名称不能为空');
     const id = 'ct' + uuid();
-    const mx = await env.DB.prepare('SELECT COALESCE(MAX(sort),0) AS m FROM textbooks').first<any>();
-    await env.DB.prepare('INSERT INTO textbooks (id, name, sort, is_custom, created_at) VALUES (?,?,?,1,?)')
-      .bind(id, name, Number(mx?.m || 0) + 1, now())
+    const mx = await env.DB.prepare('SELECT COALESCE(MAX(sort),0) AS m FROM textbooks WHERE user_id = ?').bind(uid).first<any>();
+    await env.DB.prepare('INSERT INTO textbooks (id, user_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,1,?)')
+      .bind(id, uid, name, Number(mx?.m || 0) + 1, now())
       .run();
     return json({ ok: true, id });
   }
 
   if (p === '/textbook' && method === 'GET') {
     const tb = url.searchParams.get('textbook');
-    return json({ units: await textbookTree(env, tb || undefined) });
+    return json({ units: await textbookTree(env, uid, tb || undefined) });
   }
 
   if (p === '/units' && method === 'POST') {
     const body = await req.json<any>();
     const name = String(body?.name || '').trim();
     if (!name) throw new HttpError(400, '单元名称不能为空');
-    const tbId = String(body?.textbook_id || (await defaultTextbookId(env)) || '');
+    const tbId = String(body?.textbook_id || (await defaultTextbookId(env, uid)) || '');
+    if (tbId) {
+      const own = await env.DB.prepare('SELECT id FROM textbooks WHERE id = ? AND user_id = ?').bind(tbId, uid).first<any>();
+      if (!own) throw new HttpError(400, '所选教材不存在');
+    }
     const id = 'cu' + uuid();
     const mx = await env.DB.prepare('SELECT COALESCE(MAX(sort),0) AS m FROM units WHERE textbook_id = ?')
       .bind(tbId)
       .first<any>();
     await env.DB.prepare(
-      'INSERT INTO units (id, textbook_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,1,?)',
+      'INSERT INTO units (id, user_id, textbook_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,1,?)',
     )
-      .bind(id, tbId, name, Number(mx?.m || 0) + 1, now())
+      .bind(id, uid, tbId, name, Number(mx?.m || 0) + 1, now())
       .run();
     return json({ ok: true, id, textbook_id: tbId });
   }
@@ -2541,50 +2846,53 @@ async function handleApi(
     let unitId = String(body?.unit_id || '').trim();
     if (!unitId) {
       // 没选单元就放进「自定义」这个自建单元
-      unitId = await ensureCustomUnit(env, String(body?.textbook_id || '') || undefined);
+      unitId = await ensureCustomUnit(env, uid, String(body?.textbook_id || '') || undefined);
+    } else {
+      const own = await env.DB.prepare('SELECT id FROM units WHERE id = ? AND user_id = ?').bind(unitId, uid).first<any>();
+      if (!own) throw new HttpError(400, '所选单元不存在');
     }
     const mx = await env.DB.prepare('SELECT COALESCE(MAX(sort),0) AS m FROM lessons WHERE unit_id = ?')
       .bind(unitId)
       .first<any>();
     const id = 'cl' + uuid();
-    await env.DB.prepare('INSERT INTO lessons (id, unit_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,1,?)')
-      .bind(id, unitId, name, Number(mx?.m || 0) + 1, now())
+    await env.DB.prepare('INSERT INTO lessons (id, user_id, unit_id, name, sort, is_custom, created_at) VALUES (?,?,?,?,?,1,?)')
+      .bind(id, uid, unitId, name, Number(mx?.m || 0) + 1, now())
       .run();
     return json({ ok: true, id, unit_id: unitId });
   }
 
   const unitMatch = /^\/units\/([A-Za-z0-9_]+)$/.exec(p);
   if (unitMatch && method === 'DELETE') {
-    const row = await env.DB.prepare('SELECT * FROM units WHERE id = ?').bind(unitMatch[1]).first<any>();
+    const row = await env.DB.prepare('SELECT * FROM units WHERE id = ? AND user_id = ?').bind(unitMatch[1], uid).first<any>();
     if (!row) throw new HttpError(404, '单元不存在');
     if (!Number(row.is_custom)) throw new HttpError(400, '教材自带的单元不能删除。');
     await env.DB.prepare('UPDATE submissions SET lesson_id = NULL WHERE lesson_id IN (SELECT id FROM lessons WHERE unit_id = ?)')
       .bind(row.id)
       .run();
     // 只挂了单元、没挂课文的组卷条目，单元没了也要跟着清空
-    await env.DB.prepare('UPDATE submissions SET unit_id = NULL WHERE unit_id = ?').bind(row.id).run();
-    await env.DB.prepare('UPDATE papers SET unit_id = NULL WHERE unit_id = ?').bind(row.id).run();
-    await env.DB.prepare('DELETE FROM lessons WHERE unit_id = ?').bind(row.id).run();
-    await env.DB.prepare('DELETE FROM units WHERE id = ?').bind(row.id).run();
+    await env.DB.prepare('UPDATE submissions SET unit_id = NULL WHERE unit_id = ? AND user_id = ?').bind(row.id, uid).run();
+    await env.DB.prepare('UPDATE papers SET unit_id = NULL WHERE unit_id = ? AND user_id = ?').bind(row.id, uid).run();
+    await env.DB.prepare('DELETE FROM lessons WHERE unit_id = ? AND user_id = ?').bind(row.id, uid).run();
+    await env.DB.prepare('DELETE FROM units WHERE id = ? AND user_id = ?').bind(row.id, uid).run();
     return json({ ok: true });
   }
 
   const lessonMatch = /^\/lessons\/([A-Za-z0-9_]+)$/.exec(p);
   if (lessonMatch && method === 'DELETE') {
-    const row = await env.DB.prepare('SELECT * FROM lessons WHERE id = ?').bind(lessonMatch[1]).first<any>();
+    const row = await env.DB.prepare('SELECT * FROM lessons WHERE id = ? AND user_id = ?').bind(lessonMatch[1], uid).first<any>();
     if (!row) throw new HttpError(404, '课文不存在');
     if (!Number(row.is_custom)) throw new HttpError(400, '教材自带的课文不能删除。');
-    await env.DB.prepare('UPDATE submissions SET lesson_id = NULL WHERE lesson_id = ?').bind(row.id).run();
-    await env.DB.prepare('DELETE FROM lessons WHERE id = ?').bind(row.id).run();
+    await env.DB.prepare('UPDATE submissions SET lesson_id = NULL WHERE lesson_id = ? AND user_id = ?').bind(row.id, uid).run();
+    await env.DB.prepare('DELETE FROM lessons WHERE id = ? AND user_id = ?').bind(row.id, uid).run();
     return json({ ok: true });
   }
 
   if (lessonMatch && method === 'PATCH') {
     const body = await req.json<any>();
-    const row = await env.DB.prepare('SELECT * FROM lessons WHERE id = ?').bind(lessonMatch[1]).first<any>();
+    const row = await env.DB.prepare('SELECT * FROM lessons WHERE id = ? AND user_id = ?').bind(lessonMatch[1], uid).first<any>();
     if (!row) throw new HttpError(404, '课文不存在');
-    await env.DB.prepare('UPDATE lessons SET name = ?, unit_id = ? WHERE id = ?')
-      .bind(String(body?.name ?? row.name).trim() || row.name, String(body?.unit_id ?? row.unit_id), row.id)
+    await env.DB.prepare('UPDATE lessons SET name = ?, unit_id = ? WHERE id = ? AND user_id = ?')
+      .bind(String(body?.name ?? row.name).trim() || row.name, String(body?.unit_id ?? row.unit_id), row.id, uid)
       .run();
     return json({ ok: true });
   }
@@ -2594,11 +2902,18 @@ async function handleApi(
     const body = await req.json<any>();
     const ids: string[] = Array.isArray(body?.ids) ? body.ids : [];
     if (!ids.length) throw new HttpError(400, '没有选中任何作业');
-    for (const sid of ids) await deleteSubmission(env, String(sid));
+    for (const sid of ids) {
+      const own = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?').bind(sid, uid).first<any>();
+      if (own) await deleteSubmission(env, String(sid));
+    }
     return json({ ok: true, deleted: ids.length });
   }
 
   if (subMatch && method === 'DELETE') {
+    const own = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?')
+      .bind(subMatch[1], uid)
+      .first<any>();
+    if (!own) throw new HttpError(404, '提交不存在');
     await deleteSubmission(env, subMatch[1]);
     return json({ ok: true });
   }
@@ -2607,7 +2922,14 @@ async function handleApi(
     const body = await req.json<any>();
     const lessonId = body?.lesson_id === undefined ? undefined : body.lesson_id ? String(body.lesson_id) : null;
     if (lessonId === undefined) throw new HttpError(400, '缺少 lesson_id');
-    await env.DB.prepare('UPDATE submissions SET lesson_id = ? WHERE id = ?').bind(lessonId, subMatch[1]).run();
+    if (lessonId) {
+      const own = await env.DB.prepare('SELECT id FROM lessons WHERE id = ? AND user_id = ?').bind(lessonId, uid).first<any>();
+      if (!own) throw new HttpError(400, '所选课文不存在');
+    }
+    const r = await env.DB.prepare('UPDATE submissions SET lesson_id = ? WHERE id = ? AND user_id = ?')
+      .bind(lessonId, subMatch[1], uid)
+      .run();
+    if (!Number(r?.meta?.changes || 0)) throw new HttpError(404, '提交不存在');
     return json({ ok: true });
   }
 

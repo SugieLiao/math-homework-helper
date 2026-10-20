@@ -68,10 +68,12 @@ export async function renderSettings() {
   view.innerHTML = `<div class="empty">加载中…</div>`;
   let s;
   let profiles = [];
+  let user = null;
   try {
     const d = await api.get('/settings');
     s = d.settings;
     profiles = d.profiles || [];
+    user = d.user || null;
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
@@ -95,6 +97,18 @@ export async function renderSettings() {
 
   view.innerHTML = `
     <h2>设置</h2>
+    ${
+      user
+        ? `<div class="card" style="display:flex;align-items:center;gap:10px;padding:10px 14px">
+            <span style="font-size:22px;line-height:1">${esc(user.avatar || '🙂')}</span>
+            <div style="flex:1">
+              <b>${esc(user.name)}</b> 的设置
+              <div class="hint">模型、年级、姓名都只对这个人生效。换人点右上角头像。</div>
+            </div>
+            <a class="btn sm" href="#/users">管理用户</a>
+          </div>`
+        : ''
+    }
 
     <div class="card">
       <h3>当前生效的模型</h3>

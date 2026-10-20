@@ -1,5 +1,5 @@
-import { api, setUnauthorizedHandler, setPasscode, getPasscode } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, openImage } from './util.js';
+import { api, setUnauthorizedHandler, setPasscode, getPasscode, getUserId, setUserId } from './api.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, promptDialog, openImage } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -2410,6 +2410,259 @@ async function handlePaperFile(input) {
 filePaper.addEventListener('change', () => handlePaperFile(filePaper));
 filePaperAlbum.addEventListener('change', () => handlePaperFile(filePaperAlbum));
 
+/* ------------------------------------------------ 用户 */
+/* 家里的每个孩子一个账号。作业/错题/变式/卷子/大纲/模型设置都按 user_id 分开存，
+   家庭口令只有一份、大家共用；换人只换「看谁的数据」。 */
+let users = []; // GET /users 的结果，含每人的作业数/题数
+let currentUser = { id: '', name: '', avatar: '🙂' };
+
+export function getCurrentUser() {
+  return currentUser;
+}
+
+function paintUserChip() {
+  const av = document.getElementById('uc-avatar');
+  const nm = document.getElementById('uc-name');
+  if (av) av.textContent = currentUser.avatar || '🙂';
+  if (nm) nm.textContent = currentUser.name || '用户';
+}
+
+/* 拉用户列表并把「当前用户」对齐到本机记的那个 id。
+   本机记的 id 可能已经不存在了（换手机、用户被删），这时落到后端给的默认用户。 */
+async function loadUsers() {
+  let d = null;
+  try {
+    d = await api.get('/users');
+  } catch (e) {
+    /* 拉不到就不显示用户，别把整页卡住 */
+  }
+  users = (d && d.users) || [];
+  if (!users.length) {
+    paintUserChip();
+    return;
+  }
+  const want = getUserId();
+  const hit = users.find((u) => u.id === want) || users.find((u) => u.id === (d && d.current)) || users[0];
+  currentUser = { id: hit.id, name: hit.name, avatar: hit.avatar || '🙂' };
+  if (getUserId() !== hit.id) setUserId(hit.id);
+  paintUserChip();
+}
+
+function renderUserModal() {
+  const box = document.getElementById('user-list');
+  if (!box) return;
+  if (!users.length) {
+    box.innerHTML = `<div class="hint">没拉到用户列表，检查一下网络。</div>`;
+    return;
+  }
+  box.innerHTML = users
+    .map(
+      (u) => `<button class="user-row ${u.id === currentUser.id ? 'cur' : ''}" data-uid="${esc(u.id)}">
+        <span class="ur-avatar">${esc(u.avatar || '🙂')}</span>
+        <span class="ur-main">
+          <span class="ur-name">${esc(u.name)}</span>
+          <span class="ur-sub">${u.submission_count || 0} 份作业 · ${u.question_count || 0} 道题</span>
+        </span>
+        ${u.id === currentUser.id ? '<span class="ur-cur">当前</span>' : ''}
+      </button>`,
+    )
+    .join('');
+  box.querySelectorAll('.user-row').forEach((b) => {
+    b.onclick = () => switchUser(b.dataset.uid);
+  });
+}
+
+async function openUserModal() {
+  document.getElementById('user-modal').classList.remove('hidden');
+  await loadUsers();
+  renderUserModal();
+}
+
+function closeUserModal() {
+  document.getElementById('user-modal').classList.add('hidden');
+}
+
+/* 切人：换 localStorage 里的 id → 清掉按人缓存的教材选择 → 回首页整页重画。
+   必须回首页：当前可能停在某份作业/错题详情，那是上一个人的数据，不能留着。 */
+function switchUser(id) {
+  if (!id) return;
+  const u = users.find((x) => x.id === id);
+  if (id !== currentUser.id) {
+    setUserId(id);
+    currentUser = { id, name: u ? u.name : '', avatar: (u && u.avatar) || '🙂' };
+    paintUserChip();
+    // 教材 id 是每人一份的，跨用户留着会把 A 的教材 id 拿去查 B 的大纲
+    localStorage.removeItem(TB_KEY);
+    localStorage.removeItem(SORT_KEY);
+    closeUserModal();
+    toast(`已切换到「${currentUser.name}」`);
+    routeEpoch += 1; // 让上一个人还在飞的请求作废
+  }
+  closeUserModal();
+  if (location.hash === '' || location.hash === '#/') route();
+  else location.hash = '#/';
+}
+
+document.getElementById('user-chip').onclick = openUserModal;
+document.getElementById('user-close').onclick = closeUserModal;
+document.getElementById('user-modal').addEventListener('click', (e) => {
+  if (e.target.id === 'user-modal') closeUserModal();
+});
+document.getElementById('user-manage').onclick = () => {
+  closeUserModal();
+  location.hash = '#/users';
+};
+
+/* ------------------------------------------------ 用户管理页 */
+async function renderUsers() {
+  const epoch = routeEpoch;
+  view.innerHTML = listSkeleton('正在加载用户…', 3);
+  let d;
+  try {
+    d = await api.get('/users');
+  } catch (e) {
+    if (!stalePage(epoch)) view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    return;
+  }
+  if (stalePage(epoch)) return;
+  users = d.users || [];
+  // 进这个页时顺手把当前用户对齐（比如别人刚在另一台设备上改过）
+  const hit = users.find((u) => u.id === currentUser.id) || users[0];
+  if (hit) {
+    currentUser = { id: hit.id, name: hit.name, avatar: hit.avatar || '🙂' };
+    setUserId(hit.id);
+    paintUserChip();
+  }
+  paintUsersPage();
+}
+
+function paintUsersPage() {
+  view.innerHTML = `
+    <h2>用户管理</h2>
+
+    <div class="card">
+      <h3>谁在用这台设备</h3>
+      <div class="hint">作业、错题、举一反三、卷子、大纲、模型设置都按人分开存，互相看不到。家庭口令是共用的，换人不用重输。</div>
+      <div style="margin-top:4px">
+        ${users
+          .map(
+            (u) => `<div class="u-manage-row">
+              <span class="ur-avatar">${esc(u.avatar || '🙂')}</span>
+              <div class="ur-main">
+                <div class="ur-name">${esc(u.name)}${u.id === currentUser.id ? ' <span class="tag ok">当前</span>' : ''}</div>
+                <div class="hint">${u.submission_count || 0} 份作业 · ${u.question_count || 0} 道题</div>
+              </div>
+              <div class="row wrap" style="gap:6px">
+                ${u.id === currentUser.id ? '' : `<button class="btn sm" data-act="switch" data-id="${esc(u.id)}">切换过去</button>`}
+                <button class="btn sm" data-act="rename" data-id="${esc(u.id)}" data-name="${esc(u.name)}">改名</button>
+                ${users.length > 1 ? `<button class="btn sm danger" data-act="del" data-id="${esc(u.id)}" data-name="${esc(u.name)}">删除</button>` : ''}
+              </div>
+            </div>`,
+          )
+          .join('')}
+      </div>
+    </div>
+
+    <div class="card">
+      <h3>新增用户</h3>
+      <div class="field"><label>名字</label><input type="text" id="nu-name" maxlength="20" placeholder="如「小七」「妹妹」" /></div>
+      <div class="field"><label>头像（填一个表情就行）</label><input type="text" id="nu-avatar" maxlength="4" value="🙂" /></div>
+      <div class="field">
+        <label>要不要照抄现有某个人的设置</label>
+        <select id="nu-copy">
+          <option value="">— 从空白开始 —</option>
+          ${users.map((u) => `<option value="${esc(u.id)}" ${u.id === currentUser.id ? 'selected' : ''}>照抄「${esc(u.name)}」</option>`).join('')}
+        </select>
+        <div class="hint">只抄结构和设置，不会带走任何作业、错题、卷子。</div>
+      </div>
+      <div class="row wrap" style="gap:16px;margin:2px 0 12px">
+        <label class="row" style="gap:6px"><input type="checkbox" id="nu-copy-syl" checked /> 大纲（教材 / 单元 / 课文）</label>
+        <label class="row" style="gap:6px"><input type="checkbox" id="nu-copy-set" checked /> 模型设置（含 Key）</label>
+      </div>
+      <div class="row-end"><button class="btn primary" id="btn-nu-add">新增用户</button></div>
+    </div>
+
+    <div class="hint" style="margin:6px 4px">⚠️ 删除用户会连他/她的所有作业、题目、错题、卷子、大纲一起删掉，删了找不回来。</div>`;
+
+  view.querySelectorAll('button[data-act]').forEach((b) => {
+    b.onclick = () => onUserAction(b.dataset.act, b.dataset.id, b.dataset.name || '');
+  });
+
+  document.getElementById('btn-nu-add').onclick = async () => {
+    const name = document.getElementById('nu-name').value.trim();
+    if (!name) {
+      toast('先给这个用户起个名字');
+      return;
+    }
+    const body = {
+      name,
+      avatar: document.getElementById('nu-avatar').value.trim() || '🙂',
+    };
+    const copyFrom = document.getElementById('nu-copy').value;
+    if (copyFrom) {
+      body.copy_from = copyFrom;
+      body.copy_syllabus = document.getElementById('nu-copy-syl').checked;
+      body.copy_settings = document.getElementById('nu-copy-set').checked;
+    }
+    busy('新建中…' + (copyFrom ? '（正在抄大纲，要几秒）' : ''));
+    try {
+      const r = await api.post('/users', body);
+      await loadUsers();
+      idle();
+      toast(`已新增「${r.name}」`);
+      paintUsersPage();
+    } catch (e) {
+      idle();
+      toast(e.message, 6000);
+    }
+  };
+}
+
+async function onUserAction(act, id, name) {
+  if (act === 'switch') {
+    switchUser(id);
+    return;
+  }
+  if (act === 'rename') {
+    const v = await promptDialog({ title: `给「${name}」改个名字`, value: name, placeholder: '新名字', maxlength: 20, okText: '保存' });
+    if (!v || v === name) return;
+    busy('保存中…');
+    try {
+      await api.patch(`/users/${id}`, { name: v });
+      await loadUsers();
+      idle();
+      toast('已改名');
+      paintUsersPage();
+    } catch (e) {
+      idle();
+      toast(e.message, 6000);
+    }
+    return;
+  }
+  if (act === 'del') {
+    // 删人＝删数据，问两次。第一次说清楚删什么，第二次只说「确定吗」。
+    const ok1 = await confirmDialog(
+      `「${name}」的所有作业、题目、错题、举一反三、卷子、大纲都会被一起删掉，删了找不回来。`,
+      { title: `删除用户「${name}」？`, okText: '继续删除' },
+    );
+    if (!ok1) return;
+    const ok2 = await confirmDialog('再确认一次：这些数据真的会被清空，不能恢复。', { title: '真的确定？', okText: '删除' });
+    if (!ok2) return;
+    busy('删除中…');
+    try {
+      await api.del(`/users/${id}`);
+      const wasMe = id === currentUser.id;
+      await loadUsers(); // 删掉的如果是当前用户，这里会自动落到剩下的第一个
+      idle();
+      toast(wasMe ? `已删除，现在用「${currentUser.name}」` : `已删除「${name}」`);
+      paintUsersPage();
+    } catch (e) {
+      idle();
+      toast(e.message, 6000);
+    }
+  }
+}
+
 /* ------------------------------------------------ 路由 */
 /* 切页时的顶部进度条：渲染要等接口，期间没有任何变化会让人以为卡住了 */
 let routeSeq = 0;
@@ -2455,6 +2708,7 @@ async function route() {
     if (hash.startsWith('/paper-print/')) return await renderPaperPrint(hash.slice('/paper-print/'.length));
     if (hash.startsWith('/paper/')) return await renderPaper(hash.slice('/paper/'.length));
     if (hash.startsWith('/wrong')) return await wrongBook();
+    if (hash.startsWith('/users')) return await renderUsers();
     if (hash.startsWith('/settings')) return await renderSettings();
     view.innerHTML = '<div class="empty">页面不存在</div>';
   } catch (e) {
@@ -2482,4 +2736,9 @@ document.addEventListener(
   false,
 );
 
-route();
+/* 启动：先认人（谁在用决定所有接口取谁的数据），再画页 */
+async function boot() {
+  await loadUsers();
+  await route();
+}
+boot();

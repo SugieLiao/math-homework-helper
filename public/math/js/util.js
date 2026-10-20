@@ -143,6 +143,60 @@ export function confirmDialog(message, opts = {}) {
   });
 }
 
+/**
+ * 单行输入弹窗，替代原生 prompt()（原生 prompt 在 iOS 上样式不可控、还会被弹窗拦截）。
+ * 返回 Promise<string | null>：点确定返回去空格后的文本，取消/Esc/点遮罩返回 null。
+ */
+export function promptDialog(opts = {}) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `
+      <div class="modal-card confirm-card" role="dialog" aria-modal="true">
+        <h3>${esc(opts.title || '请输入')}</h3>
+        ${opts.message ? `<div class="confirm-msg">${esc(opts.message).replace(/\n/g, '<br/>')}</div>` : ''}
+        <input type="text" data-act="input" maxlength="${opts.maxlength || 20}"
+          placeholder="${esc(opts.placeholder || '')}" value="${esc(opts.value || '')}" />
+        <div class="row-end">
+          <button class="btn" data-act="no">${esc(opts.cancelText || '取消')}</button>
+          <button class="btn primary" data-act="yes">${esc(opts.okText || '确定')}</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    const input = wrap.querySelector('[data-act=input]');
+    let closed = false;
+    const done = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(v);
+    };
+    const submit = () => {
+      const v = input.value.trim();
+      if (!v) {
+        input.focus();
+        return;
+      }
+      done(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') done(null);
+      else if (e.key === 'Enter') submit();
+    };
+    wrap.querySelector('[data-act=no]').onclick = () => done(null);
+    wrap.querySelector('[data-act=yes]').onclick = submit;
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(null);
+    });
+    document.addEventListener('keydown', onKey);
+    setTimeout(() => {
+      input.focus();
+      input.select();
+    }, 0);
+  });
+}
+
 export function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso.replace(' ', 'T') + (iso.includes('Z') ? '' : 'Z'));
