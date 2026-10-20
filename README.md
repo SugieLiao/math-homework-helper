@@ -144,6 +144,27 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/workers/routes
 
 费用参考（批改一次作业约几张图）：豆包 2.0 mini 输入 ¥0.2 / 百万 tokens、输出 ¥2 / 百万 tokens，日常家用每月基本是几毛到几块钱。
 
+## 三个小应用互跳（应用切换器）
+
+`kids.liaohao.cc` 下有三个给孩子的应用，左上角应用名变成了切换入口，点一下直接跳到另一个：
+
+| 应用 | 地址 | 挂载位置 |
+|---|---|---|
+| 📐 数学家 | `https://kids.liaohao.cc/math/` | 顶栏 `.brand` |
+| 🎧 听写小助手 | `https://kids.liaohao.cc/dictation/` | 页头 `.topbar h1` |
+| 🌱 背书芽 | `https://kids.liaohao.cc/recitation/` | 侧栏品牌行 / 窄屏顶栏（React 组件） |
+
+- **共用脚本**：`public/app/app-switch.js` → `https://kids.liaohao.cc/app/app-switch.js`（由本 Worker 的 `/app/*` 路由托管）。
+  静态页只要在 `</body>` 前加一行即可，脚本自带样式、不依赖宿主 CSS，加载失败也不影响页面：
+  ```html
+  <script src="/app/app-switch.js" data-app="dictation" data-mount=".topbar h1"></script>
+  ```
+  `data-app` 标当前应用（标「当前」并跳过自己），`data-mount` 指定入口元素（默认自动找 `header h1` / `.brand` / `h1`）。
+- **背书芽**是 Next.js 应用，用同一套 UI 的 React 版本（`app/app-switcher.tsx`，样式在 `app/globals.css` 的 `.appsw-*`），
+  因为 React 会重渲染，直接注入 DOM 会被覆盖。
+- 跳转是**整页跳转**（`location.href`），所以换应用等于刷新出另一个应用。
+- 加第四个应用时：改 `app-switch.js` 的 `APPS` 和背书芽的 `APPS` 两处。
+
 ## 多用户（每个孩子一份数据）
 
 - **怎么用**：顶栏右上角的头像胶囊 → 弹出用户列表 → 点谁就切到谁；点「管理用户」进 `#/users` 做新增 / 改名 / 删除。
