@@ -30,11 +30,16 @@ body {
 .small { font-size: 13px; }
 
 /* ---------------- layout ---------------- */
+/* 顶栏底色/分隔线仍然铺满窗口，但里面的内容收在和页面内容一样的 900px 里，
+   这样「数学家」、导航、用户头像都跟下面的卡片左右对齐，不会各自飘到窗口边上 */
 .topbar {
   position: sticky; top: 0; z-index: 30;
-  display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; padding: 12px 18px;
   background: #fff; border-bottom: 1px solid var(--line);
+}
+.topbar-inner {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 12px 14px;
+  max-width: 900px; margin: 0 auto;
 }
 .brand { font-weight: 700; font-size: 17px; letter-spacing: .5px; }
 .topnav { display: flex; gap: 6px; flex: 1 1 auto; min-width: 0; justify-content: flex-end; }
@@ -395,7 +400,7 @@ img.zoomable { cursor: zoom-in; }
 .u-manage-row .ur-name { font-weight: 600; }
 /* 顶部导航多了「组卷」一项，窄屏要收一点才放得下 */
 @media (max-width: 560px) {
-  .topbar { padding: 9px 10px; gap: 8px; }
+  .topbar-inner { padding: 9px 10px; gap: 8px; }
   .brand { font-size: 15px; }
   .topnav { gap: 2px; overflow-x: auto; -webkit-overflow-scrolling: touch; }
   .topnav a { padding: 5px 8px; font-size: 13px; white-space: nowrap; }
