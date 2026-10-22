@@ -220,7 +220,12 @@ async function home(opts = {}) {
       )
       .join('');
 
+  // 从「大纲 → 某课 → 看作业」进来的（#/textbook/l/xxx），这是二级页面：给个返回，回大纲。
+  // 用 hash 判断而不是靠传参，这样在本页里换教材/换课文/换排序重画后按钮还在。
+  const fromTextbook = (location.hash || '').indexOf('#/textbook/l/') === 0;
+
   view.innerHTML = `
+    ${fromTextbook ? `<div class="row wrap" style="margin:4px 0 8px">${backBtnHtml()}</div>` : ''}
     <div class="hero">
       <button class="btn primary big" id="btn-shoot">📷 拍照交作业</button>
       <button class="btn primary big" id="btn-album">🖼 从相册交作业</button>
@@ -277,6 +282,7 @@ async function home(opts = {}) {
     localStorage.setItem(SORT_KEY, e.target.value);
     await home({ textbook: tbId, lesson: lessonFilter, sort: e.target.value });
   };
+  if (fromTextbook) bindBackBtn('#/textbook');
 
   let data;
   try {
@@ -2541,6 +2547,7 @@ async function renderUsers() {
 
 function paintUsersPage() {
   view.innerHTML = `
+    <div class="row wrap" style="margin:4px 0 8px">${backBtnHtml()}</div>
     <h2>用户管理</h2>
 
     <div class="card">
@@ -2587,6 +2594,7 @@ function paintUsersPage() {
 
     <div class="hint" style="margin:6px 4px">⚠️ 删除用户会连他/她的所有作业、题目、错题、卷子、大纲一起删掉，删了找不回来。</div>`;
 
+  bindBackBtn('#/');
   view.querySelectorAll('button[data-act]').forEach((b) => {
     b.onclick = () => onUserAction(b.dataset.act, b.dataset.id, b.dataset.name || '');
   });
