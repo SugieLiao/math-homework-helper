@@ -408,7 +408,11 @@ function compressToJpeg(file, maxSide, quality) {
  * 默认框比图片小一圈（四周留一点边），看得出来这是个可以拖的框。
  * 「全选整张」回到整张；「用原图」跳过裁剪；「不用这张」放弃。
  * 返回 Promise<File|null>：null 表示用户放弃这张照片。
- * opts: { title?, index?, total? }
+ * opts: { title?, index?, total?, skipLabel?, onSkip?, more?, onMore? }
+ *   skipLabel：「不用这张」的自定义文案（单张上传时用来显示「↻ 重拍 / ↻ 重选」）
+ *   onSkip：点「不用这张」时同步回调（还在用户手势里，可以在里面直接调起相机）
+ *   more：非空时多显示一个按钮（如「＋ 再拍一张」）——收下这张并继续添加
+ *   onMore：点那个按钮时同步回调（只做标记，真正的调起由调用方负责）
  */
 export function cropDialog(file, opts = {}) {
   return new Promise((resolve) => {
@@ -427,10 +431,11 @@ export function cropDialog(file, opts = {}) {
         </div>
         <div class="row wrap crop-ops">
           <button class="btn sm" data-act="full">全选整张</button>
+          ${opts.more ? `<button class="btn sm" data-act="more">${esc(opts.more)}</button>` : ''}
           <span class="small muted" data-act="size"></span>
         </div>
         <div class="row-end">
-          <button class="btn" data-act="skip">不用这张</button>
+          <button class="btn" data-act="skip">${esc(opts.skipLabel || '不用这张')}</button>
           <button class="btn" data-act="raw">用原图</button>
           <button class="btn primary" data-act="ok">确定</button>
         </div>
@@ -610,7 +615,31 @@ export function cropDialog(file, opts = {}) {
     }
 
     wrap.querySelector('[data-act=full]').onclick = selectAll;
-    wrap.querySelector('[data-act=skip]').onclick = () => done(null);
+    // 「不用这张」：单张上传时这里其实是「重拍 / 重选」，同步回调还在用户手势里，
+    // 调用方可以在里面立刻重新调起相机或相册
+    wrap.querySelector('[data-act=skip]').onclick = () => {
+      if (typeof opts.onSkip === 'function') {
+        try {
+          opts.onSkip();
+        } catch (e) {
+          /* 调起失败也不影响关闭 */
+        }
+      }
+      done(null);
+    };
+    const moreBtn = wrap.querySelector('[data-act=more]');
+    if (moreBtn) {
+      moreBtn.onclick = () => {
+        if (typeof opts.onMore === 'function') {
+          try {
+            opts.onMore();
+          } catch (e) {
+            /* 忽略 */
+          }
+        }
+        doCrop();
+      };
+    }
     wrap.querySelector('[data-act=raw]').onclick = () => done(decoded);
     wrap.querySelector('[data-act=ok]').onclick = doCrop;
     wrap.addEventListener('click', (e) => {

@@ -2279,9 +2279,16 @@ function renderShotsTray() {
     </div>`;
 }
 
+/** 在用户手势里同步调起相机 / 相册（「↻ 重拍 / ↻ 重选」用） */
+function reopenPicker(kind) {
+  const el = document.getElementById(kind === 'album' ? 'file-homework-album' : 'file-homework');
+  if (el) el.click();
+}
+
 /**
- * 照片进托盘之前先让用户框选范围：逐张弹裁剪框，确认后只留框里的部分。
- * 用户点「不用这张」就跳过那张；「用原图」保留整张。
+ * 选好照片后先让用户框选范围，只留框里的部分。
+ * 用户愿意裁剪就说明这张照片没问题，所以裁完直接上传，不再弹一遍「确认照片」。
+ * 想一次交好几页就点裁剪框里的「＋ 再拍一张」，攒够了在托盘里一次性上传。
  */
 async function addToTray(files, kind) {
   if (kind) trayKind = kind;
@@ -2293,9 +2300,24 @@ async function addToTray(files, kind) {
   const picked = files.slice(0, room);
   if (files.length > room) toast(`一次最多 ${MAX_PAGES} 页，多出的 ${files.length - room} 张没加进来`, 6000);
 
+  // 只有「全新的一次上传、且就这一张」时，取消按钮才变成重拍 / 重选
+  const freshOne = picked.length === 1 && trayFiles.length === 0;
+  const verb = kind === 'shoot' ? '拍' : '选';
+  const skipLabel = freshOne ? (kind === 'shoot' ? '↻ 重拍' : '↻ 重选') : '不用这张';
+
   let kept = 0;
+  let wantMore = false;
   for (let i = 0; i < picked.length; i++) {
-    const out = await cropDialog(picked[i], { index: i + 1, total: picked.length });
+    const out = await cropDialog(picked[i], {
+      index: i + 1,
+      total: picked.length,
+      skipLabel,
+      onSkip: freshOne ? () => reopenPicker(kind) : null,
+      more: trayFiles.length + kept + 1 < MAX_PAGES ? `＋ 再${verb}一张` : '',
+      onMore: () => {
+        wantMore = true;
+      },
+    });
     if (out) {
       trayFiles.push(out);
       trayOrigins.push(picked[i]);
@@ -2312,7 +2334,16 @@ async function addToTray(files, kind) {
     }
     return;
   }
-  renderShotsTray();
+  if (wantMore) {
+    renderShotsTray();
+    return;
+  }
+  // 攒够了就别再让用户多点一次「开始批改」，裁完直接上传
+  const shots = trayFiles.slice();
+  trayFiles = [];
+  trayOrigins = [];
+  closeShotsTray();
+  uploadHomeworkFiles(shots);
 }
 
 // 托盘里的按钮都用事件委托，重渲染后不用重新绑
