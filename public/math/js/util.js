@@ -404,7 +404,10 @@ function compressToJpeg(file, maxSide, quality) {
 /* ------------------------------------------------ 选范围裁剪（交作业前） */
 /**
  * 拍完 / 选完照片后，让用户自己框出要上传的那部分。
- * 支持拖动选区、拖四角四边改大小；「用原图」跳过裁剪，「不用这张」放弃。
+ * - 直接在图上拖 → 画出新选区（默认整张时也一样，拖了就是重新框，不再是「拖不动的整张框」）
+ * - 拖框内移动、拖四角四边改大小
+ * - 「重新框选」先清掉选区，方便从空白重新拖一个
+ * - 「全选整张」回到整张；「用原图」跳过裁剪；「不用这张」放弃
  * 返回 Promise<File|null>：null 表示用户放弃这张照片。
  * opts: { title?, index?, total? }
  */
@@ -419,12 +422,13 @@ export function cropDialog(file, opts = {}) {
     wrap.innerHTML = `
       <div class="modal-card crop-card" role="dialog" aria-modal="true">
         <h3>${esc(opts.title || autoTitle)}</h3>
-        <p class="small muted crop-sub">在图上拖一个框，只框住要批改的部分；拖框移动，拖四角或四边改大小。</p>
+        <p class="small muted crop-sub" data-act="sub">在图上拖一个框，只框住要批改的部分；拖框移动，拖四角或四边改大小；想重来点「重新框选」。</p>
         <div class="crop-stage">
           <div class="crop-loading">正在准备图片…</div>
         </div>
         <div class="row wrap crop-ops">
           <button class="btn sm" data-act="full">全选整张</button>
+          <button class="btn sm" data-act="redraw">重新框选</button>
           <span class="small muted" data-act="size"></span>
         </div>
         <div class="row-end">
@@ -438,6 +442,9 @@ export function cropDialog(file, opts = {}) {
     const MIN = 24; // 选区最小边长（屏幕像素）
     const stage = wrap.querySelector('.crop-stage');
     const sizeLabel = wrap.querySelector('[data-act=size]');
+    const sub = wrap.querySelector('[data-act=sub]');
+    const SUB_DEFAULT = '在图上拖一个框，只框住要批改的部分；拖框移动，拖四角或四边改大小；想重来点「重新框选」。';
+    const SUB_NEWBAR = '选区已清空：在图上拖一个框吧（不框直接「确定」= 整张）。';
     const box = document.createElement('div');
     box.className = 'crop-box hidden';
     box.innerHTML = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w']
@@ -489,6 +496,8 @@ export function cropDialog(file, opts = {}) {
 
     function apply() {
       if (!sel || !W) return;
+      box.classList.remove('hidden');
+      if (sub && sub.textContent === SUB_NEWBAR) sub.textContent = SUB_DEFAULT;
       box.style.left = `${OX + sel.x}px`;
       box.style.top = `${OY + sel.y}px`;
       box.style.width = `${sel.w}px`;
@@ -502,14 +511,26 @@ export function cropDialog(file, opts = {}) {
       apply();
     }
 
+    /** 清掉选区：整张图都变成「空地」，下一次拖动就是画新框 */
+    function clearSel() {
+      sel = null;
+      drag = null;
+      box.classList.add('hidden');
+      sizeLabel.textContent = '';
+      if (sub) sub.textContent = SUB_NEWBAR;
+    }
+
     function onDown(e) {
       if (!img || !W) return;
       if (e.button && e.button !== 0) return;
       measure();
       const h = e.target && e.target.dataset ? e.target.dataset.h : null;
+      // 默认选区就是整张：整张框既拖不动也看不出变化，这时候在图上拖应该直接画新框，
+      // 否则用户会觉得「只能拖系统给的框，拖不出新框」。
+      const isFull = sel && sel.w >= W - 2 && sel.h >= H - 2;
       if (h) {
         drag = { mode: 'resize', h, sx: e.clientX, sy: e.clientY, orig: { ...sel } };
-      } else if (e.target === box) {
+      } else if (e.target === box && sel && !isFull) {
         drag = { mode: 'move', sx: e.clientX, sy: e.clientY, orig: { ...sel } };
       } else {
         const ir = img.getBoundingClientRect();
@@ -608,6 +629,7 @@ export function cropDialog(file, opts = {}) {
     }
 
     wrap.querySelector('[data-act=full]').onclick = selectAll;
+    wrap.querySelector('[data-act=redraw]').onclick = clearSel;
     wrap.querySelector('[data-act=skip]').onclick = () => done(null);
     wrap.querySelector('[data-act=raw]').onclick = () => done(decoded);
     wrap.querySelector('[data-act=ok]').onclick = doCrop;

@@ -469,16 +469,18 @@ async function home(opts = {}) {
 }
 
 /* ------------------------------------------------ 作业详情 */
-/* 详情页顶部的「返回」：有上一页就回上一页（作业列表 / 组卷页），没有历史就直接回作业列表 */
-function backBtnHtml() {
-  return '<button class="btn sm" id="btn-back" style="flex:0 0 auto">‹ 返回</button>';
+/* ------------------------------------------------ 全应用统一的「返回」
+   样式：小按钮「‹ 返回」；行为：有上一页就回上一页，没有（别人直接发链接进来）就回 fallback。
+   作业详情、举一反三、打印页、卷子打印页都用它，别再各写各的。 */
+export function backBtnHtml(label) {
+  return `<button class="btn sm" id="btn-back" style="flex:0 0 auto">${esc(label || '‹ 返回')}</button>`;
 }
-function bindBackBtn() {
+export function bindBackBtn(fallback) {
   const b = document.getElementById('btn-back');
   if (!b) return;
   b.onclick = () => {
     if (window.history.length > 1) window.history.back();
-    else location.hash = '#/';
+    else location.hash = fallback || '#/';
   };
 }
 
@@ -1956,7 +1958,7 @@ async function renderPaper(id) {
       }</div>
     </div>
     <div id="pi-list">${items.length ? items.map(itemHtml).join('') : '<div class="empty">这张卷子一道题都没有了</div>'}</div>`;
-  bindBackBtn();
+  bindBackBtn('#/compose');
 
   const boxes = () => Array.from(view.querySelectorAll('.pcheck'));
   const refreshSel = () => {
@@ -2124,7 +2126,7 @@ async function renderPaperPrint(id) {
         <h3 style="margin:0">共 ${items.length} 题，确认后打印</h3>
         <span class="spacer"></span>
         <button class="btn primary" onclick="window.print()">🖨 打印</button>
-        <a class="btn" href="#/paper/${id}">返回编辑</a>
+        ${backBtnHtml()}
       </div>
       <div class="hint">试卷只印题干和空白，答案不会出现在纸上。做完拍照上传批改，或家长对照网页上的答案看。</div>
     </div>
@@ -2149,6 +2151,7 @@ async function renderPaperPrint(id) {
         )
         .join('')}
     </div>`;
+  bindBackBtn(`#/paper/${id}`);
 }
 
 /* ------------------------------------------------ 上传作业 */

@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import { esc, nl2br, toast, busy, idle, fmtDate, compressImage } from './util.js';
-import { masteryBadge, editDialog, showQueueTip } from './app.js';
+import { masteryBadge, editDialog, showQueueTip, backBtnHtml, bindBackBtn } from './app.js';
 
 const view = () => document.getElementById('view');
 
@@ -57,6 +57,7 @@ export async function renderQuestion(id) {
   view().innerHTML = `
     <div class="card q-card ${ok ? 'correct' : 'wrong'}">
       <div class="row wrap">
+        ${backBtnHtml()}
         <h2 style="margin:0">母题 ${esc(q.no)}</h2>
         <span class="badge ${ok ? 'pass' : 'wrong'}">${ok ? '做对了' : '做错了'}</span>
         ${q.knowledge ? `<span class="badge gray">${esc(q.knowledge)}</span>` : ''}
@@ -90,9 +91,10 @@ export async function renderQuestion(id) {
       <div id="vlist" style="margin-top:8px">
         ${vs.length ? vs.map((v) => variantRow(v, q)).join('') : '<div class="empty">还没有类似题，点「生成类似题」试试</div>'}
       </div>
-    </div>
-    <div class="noprint" style="margin-top:10px"><a class="btn ghost" href="#/s/${q.submission_id}">← 返回作业</a></div>`;
+    </div>`;
 
+  // 返回：正常是从作业详情点进来的，直接回上一页；直接打开链接时回这份作业
+  bindBackBtn(`#/s/${q.submission_id}`);
   bindVariantActions(q);
   document.getElementById('btn-edit-mother').onclick = () => editDialog(q);
 }
@@ -213,7 +215,7 @@ export async function renderPrint(parentId) {
         <h3 style="margin:0">共 ${vs.length} 题，确认后打印</h3>
         <span class="spacer"></span>
         <button class="btn primary" onclick="window.print()">🖨 打印</button>
-        <a class="btn" href="#/q/${parentId}">返回</a>
+        ${backBtnHtml()}
       </div>
       <div class="hint">打印后让孩子把答案写在空白格里，做完拍照上传到母题页的「拍照交答案」。</div>
     </div>
@@ -237,4 +239,5 @@ export async function renderPrint(parentId) {
         )
         .join('')}
     </div>`;
+  bindBackBtn(`#/q/${parentId}`);
 }
