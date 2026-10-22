@@ -87,6 +87,7 @@ export async function renderQuestion(id) {
         <button class="btn" id="btn-to-queue">＋ 加入组卷</button>
         <button class="btn ok" id="btn-vphoto">📷 拍照交答案</button>
         <button class="btn" id="btn-valbum">🖼 从相册选</button>
+        <button class="btn" id="btn-print">🖨 打印练习</button>
       </div>
       <div id="vlist" style="margin-top:8px">
         ${vs.length ? vs.map((v) => variantRow(v, q)).join('') : '<div class="empty">还没有类似题，点「生成类似题」试试</div>'}
@@ -169,6 +170,25 @@ function bindVariantActions(q) {
   };
   document.getElementById('btn-vphoto').onclick = () => openPicker(fi);
   document.getElementById('btn-valbum').onclick = () => openPicker(fiAlbum);
+
+  // 打印：把勾上的变式题打成纸质练习
+  // 一道都没勾就先全部勾上，省得孩子还要一题题点方框
+  document.getElementById('btn-print').onclick = async () => {
+    const all = q.variants || [];
+    if (!all.length) return toast('先点「生成类似题」，出了题才能打印');
+    let ids = Array.from(document.querySelectorAll('[data-act=sel]'))
+      .filter((x) => x.checked)
+      .map((x) => x.dataset.id);
+    if (!ids.length) {
+      ids = all.map((v) => v.id);
+      try {
+        await api.post('/variants/select', { parent_id: q.id, ids });
+      } catch (e) {
+        return toast(e.message);
+      }
+    }
+    location.hash = `#/print/${q.id}`;
+  };
 }
 
 /* 拍照 / 从相册选 上传举一反三答案 */
@@ -206,7 +226,9 @@ export async function renderPrint(parentId) {
   const q = data.question;
   const vs = (q.variants || []).filter((v) => Number(v.selected) === 1);
   if (!vs.length) {
-    view().innerHTML = `<div class="empty">还没有勾选要打印的题目<br/><a class="btn" href="#/q/${parentId}" style="margin-top:12px">回去勾选</a></div>`;
+    view().innerHTML = `<div class="empty">还没有勾选要打印的题目<br/>
+      <div class="row wrap" style="justify-content:center;margin-top:12px">${backBtnHtml()}</div></div>`;
+    bindBackBtn(`#/q/${parentId}`);
     return;
   }
   view().innerHTML = `
