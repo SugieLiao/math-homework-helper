@@ -1270,6 +1270,10 @@ async function deletePageFlow(subId, pageId, pageNo, qCount) {
 }
 
 /* ------------------------------------------------ 错题本 */
+/* 错题本排序：syllabus 按大纲（单元→课文）分组 / time 按作业时间倒序平铺。默认大纲。
+   模块级变量：改判 / 重框 / 删除后页面会重画，排序选择要留着。 */
+let wrongSort = 'syllabus';
+
 /* 错题本：按「教材 → 单元 → 课文」分组，组标题上带全选框（可整课 / 整单元选中组卷） */
 async function wrongBook() {
   const epoch = routeEpoch;
@@ -1292,20 +1296,10 @@ async function wrongBook() {
   const groupOf = (q) => ({
     uKey: q.unit_id || '__none',
     uName: q.unit_name || '未归类',
+    uSort: Number(q.unit_sort) || 0,
     lKey: q.lesson_id || '__none',
     lName: q.lesson_name ? lessonLabel(q) : '未归类',
-  });
-
-  const blocks = [];
-  const seen = new Map();
-  wrongs.forEach((q) => {
-    const g = groupOf(q);
-    const key = `${g.uKey}||${g.lKey}`;
-    if (!seen.has(key)) {
-      seen.set(key, { ...g, items: [] });
-      blocks.push(seen.get(key));
-    }
-    seen.get(key).items.push(q);
+    lSort: Number(q.lesson_sort) || 0,
   });
 
   const wrongQCard = (q) => `
@@ -1334,27 +1328,57 @@ async function wrongBook() {
     </div>`;
 
   let html = '';
-  let lastUnit = null;
-  blocks.forEach((b) => {
-    if (b.uKey !== lastUnit) {
-      if (lastUnit !== null) html += `</div>`;
-      const unitIds = blocks.filter((x) => x.uKey === b.uKey).flatMap((x) => x.items.map((i) => i.id));
-      html += `<div class="row wrap" style="margin-top:16px">
-          <div class="section-title" style="margin:0">${esc(b.uName)}</div>
+  if (wrongSort === 'syllabus') {
+    // 按大纲：单元 → 课文分组，组内按题号顺序
+    const blocks = [];
+    const seen = new Map();
+    wrongs.forEach((q) => {
+      const g = groupOf(q);
+      const key = `${g.uKey}||${g.lKey}`;
+      if (!seen.has(key)) {
+        seen.set(key, { ...g, items: [] });
+        blocks.push(seen.get(key));
+      }
+      seen.get(key).items.push(q);
+    });
+    // 按大纲真实顺序排：单元 sort 升序 → 课内 sort 升序；未归类的（sort=0）放最后
+    blocks.sort(
+      (a, b) =>
+        (a.uSort || 9999) - (b.uSort || 9999) || (a.lSort || 9999) - (b.lSort || 9999),
+    );
+    // 组内按题号 seq 排（同课多次作业的错题按题号摆，而不是按交作业时间倒序）
+    blocks.forEach((b) => b.items.sort((x, y) => (Number(x.seq) || 0) - (Number(y.seq) || 0)));
+    let lastUnit = null;
+    blocks.forEach((b) => {
+      if (b.uKey !== lastUnit) {
+        if (lastUnit !== null) html += `</div>`;
+        const unitIds = blocks.filter((x) => x.uKey === b.uKey).flatMap((x) => x.items.map((i) => i.id));
+        html += `<div class="row wrap" style="margin-top:16px">
+            <div class="section-title" style="margin:0">${esc(b.uName)}</div>
+            <span class="spacer"></span>
+            <label class="pick-all">全选本单元（${unitIds.length}）<input type="checkbox" class="ucheck" data-ids="${unitIds.join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
+          </div><div class="card" style="padding:0">`;
+        lastUnit = b.uKey;
+      }
+      html += `<div class="row wrap" style="padding:8px 10px;background:#f7f9ff;border-bottom:1px solid var(--line)">
+          <b>${esc(b.lName)}</b>
+          <span class="small muted">${b.items.length} 道错题</span>
           <span class="spacer"></span>
-          <label class="pick-all">全选本单元（${unitIds.length}）<input type="checkbox" class="ucheck" data-ids="${unitIds.join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
-        </div><div class="card" style="padding:0">`;
-      lastUnit = b.uKey;
-    }
-    html += `<div class="row wrap" style="padding:8px 10px;background:#f7f9ff;border-bottom:1px solid var(--line)">
-        <b>${esc(b.lName)}</b>
-        <span class="small muted">${b.items.length} 道错题</span>
-        <span class="spacer"></span>
-        <label class="pick-all">全选本课<input type="checkbox" class="lcheck" data-ids="${b.items.map((i) => i.id).join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
-      </div>`;
-    html += b.items.map(wrongQCard).join('');
-  });
-  if (blocks.length) html += `</div>`;
+          <label class="pick-all">全选本课<input type="checkbox" class="lcheck" data-ids="${b.items.map((i) => i.id).join(',')}" style="margin-left:6px;width:18px;height:18px;vertical-align:-3px" /></label>
+        </div>`;
+      html += b.items.map(wrongQCard).join('');
+    });
+    if (blocks.length) html += `</div>`;
+  } else {
+    // 按时间：作业时间倒序平铺（最新交的错题在最上面），每题带上来源
+    const timeMs = (q) => {
+      const t = Date.parse(String(q.sub_created_at || ''));
+      return Number.isFinite(t) ? t : 0;
+    };
+    const flat = wrongs.slice().sort((a, b) => timeMs(b) - timeMs(a) || (Number(a.seq) || 0) - (Number(b.seq) || 0));
+    html += `<div class="small muted" style="margin:2px 2px 6px">按作业时间排（新 → 旧）</div>`;
+    html += `<div class="card" style="padding:0">${flat.map(wrongQCard).join('')}</div>`;
+  }
 
   if (stalePage(epoch)) return;
   view.innerHTML = `
@@ -1363,6 +1387,10 @@ async function wrongBook() {
       <div class="row wrap">
         <b>已选 <span id="sel-count">0</span> 道错题</b>
         <span class="spacer"></span>
+        <select id="wrong-sort" title="排序方式" style="width:auto;min-width:124px;flex:0 0 auto;font-size:13px;padding:6px 28px 6px 10px">
+          <option value="syllabus" ${wrongSort === 'syllabus' ? 'selected' : ''}>按大纲排序</option>
+          <option value="time" ${wrongSort === 'time' ? 'selected' : ''}>按时间排序</option>
+        </select>
         <button class="btn sm" id="btn-w-all">全选</button>
         <button class="btn sm" id="btn-w-none">清空</button>
         <button class="btn primary" id="btn-make-paper">＋ 加入组卷</button>
@@ -1371,6 +1399,15 @@ async function wrongBook() {
       <div class="hint">勾选题目（可以按课文或整个单元批量选），点「加入组卷」先放进待组卷；攒够了去顶部「组卷」页，选母题、选方式，一次出卷。点「删除所选」把不再需要的错题清掉。</div>
     </div>
     ${wrongs.length ? html : '<div class="empty">还没有错题记录</div>'}`;
+
+  // 排序切换：不用重新请求，wrongs 都在内存里，重新渲染即可
+  const sortPick = document.getElementById('wrong-sort');
+  if (sortPick) {
+    sortPick.onchange = () => {
+      wrongSort = sortPick.value;
+      wrongBook();
+    };
+  }
 
   const boxes = () => Array.from(view.querySelectorAll('.wcheck'));
   const refreshCount = () => {

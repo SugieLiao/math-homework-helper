@@ -1697,7 +1697,7 @@ async function handleApi(
     let sql =
       `SELECT q.*, s.created_at AS sub_created_at, s.image_key AS sub_image_key,
               s.lesson_id AS lesson_id, l.name AS lesson_name, l.sort AS lesson_sort,
-              u.id AS unit_id, u.name AS unit_name,
+              u.id AS unit_id, u.name AS unit_name, u.sort AS unit_sort,
               t.id AS textbook_id, t.name AS textbook_name
        FROM questions q
        LEFT JOIN submissions s ON s.id = q.submission_id
@@ -1801,7 +1801,7 @@ async function handleApi(
        SELECT pq.id, pq.created_at, 'variant',
               v.id, v.seq, v.stem, v.answer,
               q2.knowledge, q2.is_correct, q2.submission_id,
-              s.created_at, l.name,
+              s.created_at, l.name, l.sort,
               u.id, u.name, t.id, t.name,
               q2.no, v.seq, v.difficulty
          FROM paper_queue pq
