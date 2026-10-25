@@ -445,7 +445,7 @@ export function cropDialog(file, opts = {}) {
       <div class="modal-card crop-card" role="dialog" aria-modal="true">
         <h3>${esc(opts.title || autoTitle)}</h3>
         <p class="small muted crop-sub" data-act="sub">${esc(
-          opts.hint || '拖这个框可以移动，拖四角或四边改大小，只框住要批改的部分；点「全选整张」恢复整张。',
+          opts.hint || '拖这个框可以移动，拖四角或四边改大小；双指可放大缩小图片，看得更清楚；点「全选整张」恢复整张。',
         )}</p>
         <div class="crop-stage">
           <div class="crop-loading">正在准备图片…</div>
@@ -484,6 +484,8 @@ export function cropDialog(file, opts = {}) {
     let drag = null;
     let closed = false;
     let lastRect = null; // 这次框到的范围（相对整张图的比例），挂在返回的 File 上给调用方存起来
+    let inner = null; // 装图片和框的容器（跟着图片一起缩放、一起滚动）
+    let fitW = 0; // 图片刚好铺满舞台时的宽度（双指缩放的 1 倍基准）
 
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -516,15 +518,19 @@ export function cropDialog(file, opts = {}) {
       resolve(v);
     }
 
-    /** 量出图片实际显示的位置和尺寸（图片居中 / 等比缩放时，和舞台不重合） */
+    /**
+     * 量出图片实际显示的位置和尺寸。
+     * 图片和框都装在 crop-wrap 里，参照物用 wrap 而不是舞台：
+     * 这样双指放大后舞台滚动，wrap 跟着滚，框的坐标换算不受滚动影响。
+     */
     function measure() {
-      if (!img) return;
+      if (!img || !inner) return;
       const ir = img.getBoundingClientRect();
-      const sr = stage.getBoundingClientRect();
+      const nr = inner.getBoundingClientRect();
       W = ir.width;
       H = ir.height;
-      OX = ir.left - sr.left;
-      OY = ir.top - sr.top;
+      OX = ir.left - nr.left;
+      OY = ir.top - nr.top;
     }
 
     function apply() {
@@ -629,6 +635,64 @@ export function cropDialog(file, opts = {}) {
       else if (e.key === 'Enter') doCrop();
     }
 
+    /* ---------------- 双指缩放 / 平移 ----------------
+       放大看清楚了再框：两指捏合改图片显示宽度（框按同一比例跟着缩，
+       框住的永远是图片上同一块区域），两指拖动平移舞台滚动条。 */
+    let pinch = null; // { d0, w0, cx0, cy0, sr0 }
+
+    function stageTouchStart(e) {
+      if (e.touches.length !== 2 || !img || !fitW) return;
+      const [a, b] = e.touches;
+      const ir = img.getBoundingClientRect();
+      const sr = stage.getBoundingClientRect();
+      pinch = {
+        d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
+        w0: ir.width || fitW,
+        // 两指中心当时压住的是图片上的哪一点（wrap 坐标，缩放时按宽度比例跟着变）
+        cx0: (a.clientX + b.clientX) / 2 - ir.left,
+        cy0: (a.clientY + b.clientY) / 2 - ir.top,
+      };
+      drag = null; // 双指一进来就结束单指拖框，别让框跟着乱跑
+      e.preventDefault();
+    }
+
+    function stageTouchMove(e) {
+      if (!pinch || e.touches.length !== 2 || !img) return;
+      e.preventDefault();
+      const [a, b] = e.touches;
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1;
+      const midX = (a.clientX + b.clientX) / 2;
+      const midY = (a.clientY + b.clientY) / 2;
+      // 新的显示宽度：1 倍 = 刚好铺满舞台，最大放大约 4 倍
+      const w = clamp(pinch.w0 * (d / pinch.d0), fitW, fitW * 4);
+      const k = w / (pinch.w0 || 1);
+      if (Math.abs(k - 1) < 0.001) return;
+      // 缩放选区：框住的还是图片上同一块地方
+      if (sel) {
+        sel = { x: sel.x * k, y: sel.y * k, w: sel.w * k, h: sel.h * k };
+      }
+      img.style.maxWidth = 'none';
+      img.style.maxHeight = 'none';
+      img.style.width = `${w}px`;
+      img.style.height = 'auto';
+      measure();
+      apply();
+      // 让两指中心压住的那一点跟随手指：调舞台滚动
+      const sr = stage.getBoundingClientRect();
+      const wantX = pinch.cx0 * k - (midX - sr.left);
+      const wantY = pinch.cy0 * k - (midY - sr.top);
+      stage.scrollLeft = Math.max(0, wantX);
+      stage.scrollTop = Math.max(0, wantY);
+    }
+
+    function stageTouchEnd(e) {
+      if (pinch && e.touches.length < 2) {
+        pinch = null;
+        measure();
+        apply();
+      }
+    }
+
     function doCrop() {
       if (!img || !sel) return done(decoded || null);
       lastRect = rectFrac();
@@ -705,6 +769,10 @@ export function cropDialog(file, opts = {}) {
     document.addEventListener('pointerup', onUp);
     document.addEventListener('pointercancel', onUp);
     document.addEventListener('keydown', onKey);
+    stage.addEventListener('touchstart', stageTouchStart, { passive: false });
+    stage.addEventListener('touchmove', stageTouchMove, { passive: false });
+    stage.addEventListener('touchend', stageTouchEnd);
+    stage.addEventListener('touchcancel', stageTouchEnd);
 
     // 先解码（HEIC 会自动转 JPEG），再显示出来让用户框选
     compressImage(file, 1800, 0.92)
@@ -714,11 +782,15 @@ export function cropDialog(file, opts = {}) {
         img = new Image();
         img.className = 'crop-img';
         img.onload = () => {
-          stage.appendChild(img);
-          stage.appendChild(box);
-          const ld = stage.querySelector('.crop-loading');
-          if (ld) ld.remove();
+          // 图片和框装进同一个容器：双指放大后一起缩放、跟着舞台滚动，框的坐标不会乱
+          stage.innerHTML = '';
+          inner = document.createElement('div');
+          inner.className = 'crop-wrap';
+          inner.appendChild(img);
+          inner.appendChild(box);
+          stage.appendChild(inner);
           measure();
+          fitW = W; // 刚好铺满舞台的宽度 = 双指缩放的 1 倍
           // 指定了初始范围就按它框（重框题目图），否则默认留一点边，看得出来这是个能拖的框
           if (opts.initial) initialSel();
           else defaultSel();
