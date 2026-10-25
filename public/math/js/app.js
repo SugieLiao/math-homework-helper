@@ -507,6 +507,40 @@ export function bindBackBtn(fallback) {
    用模块级变量存着：改判 / 重框题目图之后页面会重画，状态要留着，不然每次都被打回默认值。 */
 let onlyWrong = true;
 
+/**
+ * 作业详情页尾部「上一课 / 下一课」：按大纲顺序（单元 → 课文）把课展平成一条，
+ * 找到当前作业所属的课，前后各取一课，跳到那一课的作业列表（#/textbook/l/<id>）。
+ * 作业没归类（没有 lesson_id）时，这一栏就不显示——没有「课」谈不上上一课下一课。
+ */
+function paintLessonNav(s, units) {
+  const el = document.getElementById('lesson-nav');
+  if (!el) return;
+  const flat = [];
+  for (const u of units || []) {
+    for (const l of u.lessons || []) {
+      flat.push({ lessonId: l.id, lessonName: l.name, unitName: u.name });
+    }
+  }
+  const cur = s.lesson_id ? flat.findIndex((x) => x.lessonId === s.lesson_id) : -1;
+  if (cur < 0) {
+    el.classList.add('hidden');
+    return;
+  }
+  const prev = flat[cur - 1];
+  const next = flat[cur + 1];
+  const curName = flat[cur];
+  const btn = (label, target, name, disabled) =>
+    disabled
+      ? `<button class="btn sm" disabled>${label}</button>`
+      : `<a class="btn sm" href="#/textbook/l/${esc(target)}">${label}</a>`;
+  el.innerHTML = `
+    <span class="small muted" style="margin-right:8px">当前课：${esc(curName.unitName)} › ${esc(curName.lessonName)}</span>
+    <span class="spacer"></span>
+    ${btn('‹ 上一课', prev?.lessonId, prev?.lessonName, !prev)}
+    ${btn('下一课 ›', next?.lessonId, next?.lessonName, !next)}`;
+  el.classList.remove('hidden');
+}
+
 async function submission(id) {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开这份作业…', 3);
@@ -640,8 +674,10 @@ async function submission(id) {
           </div>`
     }
     <div id="qlist">${qs.map((q) => qCard(q, true, pageKeys.length > 0)).join('')}</div>
-    <div id="qlist-empty" class="card hidden"><div class="empty">这次没有错题，全部都对 🎉</div></div>`;
+    <div id="qlist-empty" class="card hidden"><div class="empty">这次没有错题，全部都对 🎉</div></div>
+    <div class="row wrap noprint" id="lesson-nav" style="margin-top:16px"></div>`;
   bindBackBtn();
+  paintLessonNav(s, units);
 
   /* 默认只显示错题，点「显示全部」把做对的也放出来。
      纯粹是显示层的显隐，不重新请求、不动数据，切来切去都是瞬间的。
