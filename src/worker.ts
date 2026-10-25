@@ -593,20 +593,24 @@ async function questionWithMastery(env: Env, row: any) {
  * 给一批题（同一份作业的）一次性挂上举一反三 + 掌握度。
  * 详情页以前是 `Promise.all(list.map(questionWithMastery))`，每道题查一次变式题，
  * 24 题 = 24 次 D1 往返。这里改成一条 SQL 按 parent_id 全查、内存分组，只花一趟。
+ * D1 单条语句绑定参数上限 100，题多时按 100 个一批分批查。
  */
 async function attachMasteryBatch(env: Env, list: any[]): Promise<any[]> {
   if (!list.length) return [];
-  const ids = list.map((r) => r.id);
-  const vs = await env.DB.prepare(
-    `SELECT * FROM variants WHERE parent_id IN (${ids.map(() => '?').join(',')}) ORDER BY seq ASC, created_at ASC`,
-  )
-    .bind(...ids)
-    .all<VariantRow>();
   const byParent = new Map<string, VariantRow[]>();
-  for (const v of vs.results || []) {
-    const a = byParent.get(v.parent_id);
-    if (a) a.push(v);
-    else byParent.set(v.parent_id, [v]);
+  const ids = list.map((r) => r.id);
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    const vs = await env.DB.prepare(
+      `SELECT * FROM variants WHERE parent_id IN (${chunk.map(() => '?').join(',')}) ORDER BY seq ASC, created_at ASC`,
+    )
+      .bind(...chunk)
+      .all<VariantRow>();
+    for (const v of vs.results || []) {
+      const a = byParent.get(v.parent_id);
+      if (a) a.push(v);
+      else byParent.set(v.parent_id, [v]);
+    }
   }
   return list.map((r) => {
     const variants = byParent.get(r.id) || [];
@@ -1722,7 +1726,9 @@ async function handleApi(
     sql += ' ORDER BY s.created_at DESC, q.seq ASC';
     const rows = await env.DB.prepare(sql).bind(...binds).all<any>();
     const all = rows.results || [];
-    const withMastery = await Promise.all(all.map((r) => questionWithMastery(env, r)));
+    // 以前是 Promise.all(all.map(questionWithMastery))，每道题查一次变式题（N+1），
+    // 错题本拉全量几十上百题就是几十上百次串行 D1 往返。改成一次 IN 全查、内存分组。
+    const withMastery = await attachMasteryBatch(env, all);
     const filtered = withMastery.filter((q) => {
       if (filter === 'wrong') return q.mastery.base_wrong;
       if (filter === 'unpassed') return !q.mastery.passed;

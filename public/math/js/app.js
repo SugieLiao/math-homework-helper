@@ -1200,33 +1200,21 @@ async function deletePageFlow(subId, pageId, pageNo, qCount) {
 async function wrongBook() {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在加载错题本…', 4);
+  // 错题本只需要一趟：/questions 已经通过 JOIN 带回了 unit_name/lesson_name，
+  // 不再单独拉 /textbooks 和 /textbook（那两趟只喂冗余的 id→名字映射，纯浪费 ~1.5s）。
   let data;
-  let textbooks = [];
-  let units = [];
   try {
-    [data] = await Promise.all([api.get('/questions')]);
+    data = await api.get('/questions?filter=wrong');
   } catch (e) {
     if (stalePage(epoch)) return;
     view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
     return;
   }
-  try {
-    textbooks = (await api.get('/textbooks')).textbooks || [];
-    const remember = localStorage.getItem(TB_KEY);
-    const tbId = remember && textbooks.some((t) => t.id === remember) ? remember : textbooks[0]?.id || '';
-    units = (await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook')).units || [];
-  } catch (e) { /* 大纲拉不到也能用 */ }
+  if (stalePage(epoch)) return;
 
   const all = (data.questions || []).map((q) => ({ ...q, wrong: !!q.mastery.base_wrong }));
   const wrongs = all.filter((q) => q.wrong);
 
-  // 课文 / 单元 id → 名字（未归类的单独一块）
-  const lessonName = new Map();
-  const unitName = new Map();
-  units.forEach((u) => {
-    unitName.set(u.id, u.name);
-    u.lessons.forEach((l) => lessonName.set(l.id, l.name));
-  });
   const groupOf = (q) => ({
     uKey: q.unit_id || '__none',
     uName: q.unit_name || '未归类',
@@ -1259,10 +1247,12 @@ async function wrongBook() {
         </div>
         <div class="stem" style="margin:4px 0">${nl2br(q.stem)}</div>
         <div class="answer-line">作答：<b>${esc(q.student_answer || '（空白）')}</b> · 正确答案：<b>${esc(q.correct_answer)}</b></div>
+        ${q.answer_image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
         ${q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
         <div class="row wrap">
           <span class="small muted">来源：${fmtDate(q.sub_created_at)} 的作业${q.lesson_name ? ` · ${esc(q.lesson_name)}` : q.unit_name ? ` · ${esc(q.unit_name)}` : ' · 未归类'}</span>
           <span class="spacer"></span>
+          <button class="btn sm" data-recrop="${q.id}">${q.answer_image_key ? '✂ 重框题目图' : '🖼 框出题目图'}</button>
           <a class="btn sm" href="#/q/${q.id}">举一反三</a>
           <button class="btn sm danger" data-delq="${q.id}">删除</button>
         </div>
@@ -1364,6 +1354,19 @@ async function wrongBook() {
     doDeleteWrong(boxes().filter((b) => b.checked).map((b) => b.dataset.id));
   view.querySelectorAll('[data-delq]').forEach((b) => {
     b.onclick = () => doDeleteWrong([b.dataset.delq]);
+  });
+  // 错题的作答图裁歪了 / 没裁上：点「重框」，从整页原图自己拖框重选（和作业详情页同一套）
+  view.querySelectorAll('[data-recrop]').forEach((b) => {
+    b.onclick = async () => {
+      const q = wrongs.find((x) => x.id === b.dataset.recrop);
+      if (!q || !q.submission_id) return;
+      let keys = [];
+      try {
+        const d = await api.get(`/submissions/${q.submission_id}`);
+        keys = (d.pages || []).map((p) => p.image_key).filter(Boolean);
+      } catch (e) { /* 拉不到就让它报「没有原图」 */ }
+      await recropQuestionImage(q.submission_id, q, keys, () => wrongBook());
+    };
   });
 }
 
