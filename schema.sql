@@ -130,7 +130,8 @@ CREATE TABLE IF NOT EXISTS questions (
   page            INTEGER DEFAULT 1,  -- 这道题在第几页照片上（多页作业用）
   answer_band     TEXT,               -- 答案区域纵向百分比 [y1,y2]（供前端裁剪）
   answer_image_key TEXT,              -- 答案区域裁剪图（R2）
-  created_at      TEXT
+  answer_crop    TEXT,               -- 家长手动框的范围（相对整张图比例 {x,y,w,h}），下次重框时预填
+  created_at     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_questions_sub ON questions (submission_id);

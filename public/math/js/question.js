@@ -1,6 +1,6 @@
 import { api } from './api.js';
 import { esc, nl2br, toast, busy, idle, fmtDate, compressImage } from './util.js';
-import { masteryBadge, editDialog, showQueueTip, backBtnHtml, bindBackBtn } from './app.js';
+import { masteryBadge, editDialog, showQueueTip, backBtnHtml, bindBackBtn, recropQuestionImage } from './app.js';
 
 const view = () => document.getElementById('view');
 
@@ -70,6 +70,7 @@ export async function renderQuestion(id) {
       ${!ok && q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
       ${!ok && q.solution ? `<div class="solbox"><div class="t">正确做法</div><pre class="sol">${esc(q.solution)}</pre></div>` : ''}
       <div class="row-end noprint" style="margin-top:10px">
+        ${!ok ? `<button class="btn sm" id="btn-recrop-img">${q.answer_image_key ? '✂ 重框题目图' : '🖼 框出题目图'}</button>` : ''}
         <button class="btn sm" id="btn-edit-mother">改判母题</button>
       </div>
     </div>
@@ -98,6 +99,19 @@ export async function renderQuestion(id) {
   bindBackBtn(`#/s/${q.submission_id}`);
   bindVariantActions(q);
   document.getElementById('btn-edit-mother').onclick = () => editDialog(q);
+
+  // 错题的题目图裁歪了：拿整页原图出来自己拖框。要先去把这份作业的各页原图找出来
+  const rcBtn = document.getElementById('btn-recrop-img');
+  if (rcBtn && q.submission_id) {
+    rcBtn.onclick = async () => {
+      let keys = [];
+      try {
+        const d = await api.get(`/submissions/${q.submission_id}`);
+        keys = (d.pages || []).map((p) => p.image_key).filter(Boolean);
+      } catch (e) { /* 拉不到就让它报「没有原图」 */ }
+      await recropQuestionImage(q.submission_id, q, keys, () => renderQuestion(q.id));
+    };
+  }
 }
 
 function bindVariantActions(q) {

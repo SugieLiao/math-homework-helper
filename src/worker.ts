@@ -1597,6 +1597,17 @@ async function handleApi(
     const form = await req.formData();
     const file = form.get('file') as File | null;
     if (!file) throw new HttpError(400, '没有收到图片');
+    // 家长手动框的范围（相对整张图的比例 {x,y,w,h}），存下来供下次「重框」时预填
+    let crop: string | null = null;
+    const rawCrop = form.get('crop');
+    if (typeof rawCrop === 'string' && rawCrop) {
+      try {
+        const r = JSON.parse(rawCrop);
+        if (r && isFinite(Number(r.y)) && isFinite(Number(r.h)) && Number(r.h) > 0) crop = rawCrop;
+      } catch {
+        crop = null; // 格式不对就算了，图照存
+      }
+    }
     // 每次上传都换一个新文件名：图片地址带一年强缓存，用固定 key 覆盖会导致
     // 浏览器 / 边缘节点一直显示旧图（重裁后看不到变化）。换 key 天然破缓存。
     const key = `ans/${qid}-${uuid().slice(0, 8)}.${extOf(file.name)}`;
@@ -1607,8 +1618,12 @@ async function handleApi(
     await env.IMAGES.put(key, await file.arrayBuffer(), {
       httpMetadata: { contentType: contentTypeOf(key) },
     });
-    await env.DB.prepare('UPDATE questions SET answer_image_key = ? WHERE id = ? AND user_id = ?')
-      .bind(key, qid, uid)
+    await env.DB.prepare(
+      crop
+        ? 'UPDATE questions SET answer_image_key = ?, answer_crop = ? WHERE id = ? AND user_id = ?'
+        : 'UPDATE questions SET answer_image_key = ? WHERE id = ? AND user_id = ?',
+    )
+      .bind(...(crop ? [key, crop, qid, uid] : [key, qid, uid]))
       .run();
     if (old?.answer_image_key && old.answer_image_key !== key) {
       try {

@@ -37,10 +37,17 @@ export function masteryLine(m) {
   return `<div class="small muted">举一反三：选了 ${m.variant_selected} 题 · 做了 ${m.variant_done} 题 · 做对 ${m.variant_correct} 题（需 ${m.need} 题）</div>`;
 }
 
-function qCard(q, withCheck = false) {
+function qCard(q, withCheck = false, canRecrop = false) {
   const ok = Number(q.is_correct) === 1;
+  // 错题才给「框题目图」：系统裁歪了可以自己拖框改，没裁过（没有图）可以补一张
+  const recropBtn =
+    !ok && canRecrop
+      ? `<button class="btn sm" data-act="recrop-img" data-id="${q.id}">${
+          q.answer_image_key ? '✂ 重框题目图' : '🖼 框出题目图'
+        }</button>`
+      : '';
   return `
-  <div class="card q-card ${ok ? 'correct' : 'wrong'}" data-q="${q.id}">
+  <div class="card q-card ${ok ? 'correct' : 'wrong'}" data-q="${q.id}" data-ok="${ok ? 1 : 0}">
     <div class="row wrap">
       ${withCheck ? `<input type="checkbox" class="pcheck" data-id="${q.id}" data-wrong="${ok ? 0 : 1}" title="勾上就放进卷子" style="width:20px;height:20px;flex:0 0 auto" />` : ''}
       <span class="q-no">${esc(q.no)}.</span>
@@ -56,6 +63,7 @@ function qCard(q, withCheck = false) {
     ${!ok && q.solution ? `<div class="solbox"><div class="t">正确做法</div><pre class="sol">${esc(q.solution)}</pre></div>` : ''}
     ${masteryLine(q.mastery)}
     <div class="row-end noprint" style="margin-top:10px">
+      ${recropBtn}
       <button class="btn sm" data-act="edit" data-id="${q.id}">改判</button>
       <button class="btn sm primary" data-act="open" data-id="${q.id}">举一反三</button>
     </div>
@@ -493,6 +501,10 @@ export function bindBackBtn(fallback) {
   };
 }
 
+/* 作业详情页默认只显示错题（家长进来就是要看错在哪），点「显示全部」才把做对的也放出来。
+   用模块级变量存着：改判 / 重框题目图之后页面会重画，状态要留着，不然每次都被打回默认值。 */
+let onlyWrong = true;
+
 async function submission(id) {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开这份作业…', 3);
@@ -507,6 +519,8 @@ async function submission(id) {
   const s = data.submission;
   const qs = data.questions || [];
   const pages = (data.pages || []).filter((p) => p.image_key);
+  const pageKeys = pages.map((p) => p.image_key); // 重框题目图时要拿整页原图给用户拖
+  const wrongCount = qs.filter((q) => !Number(q.is_correct)).length;
   let units = [];
   try {
     const t = await api.get('/textbook');
@@ -550,9 +564,9 @@ async function submission(id) {
           .join('')}
       </div>
       <div class="row wrap noprint" style="margin-top:10px">
-        <button class="btn sm" id="btn-add-page">＋ 加一页</button>
+        <button class="btn sm" id="btn-add-page">＋ 加页</button>
         <button class="btn sm" id="btn-recrop">🖼 重裁题目截图</button>
-        <span class="small muted">照片拍糊了可以换一张；漏拍了一页可以加进来，只批改新加的这一页；题目和图对不上就点「重裁」。</span>
+        <span class="small muted">照片拍糊了可以换一张；漏拍了几页可以一次选多张加进来（也能一张张接着拍），只批改新加的这几页，原来改过的一律不动；题目和图对不上就点「重裁」，或者到错题卡片上点「✂ 重框题目图」自己框。</span>
       </div>
       ${
         s.paper_id
@@ -601,7 +615,18 @@ async function submission(id) {
     </div>`
         : ''
     }
-    <div class="section-title">逐题批改</div>
+    <div class="row wrap" style="margin-top:16px">
+      <div class="section-title" style="margin:0">逐题批改</div>
+      <span class="small muted" id="qlist-note"></span>
+      <span class="spacer"></span>
+      ${
+        qs.length && wrongCount
+          ? `<button class="btn sm" id="toggle-wrong" style="flex:0 0 auto">${
+              onlyWrong ? `显示全部（${qs.length}）` : `只看错题（${wrongCount}）`
+            }</button>`
+          : ''
+      }
+    </div>
     ${
       qs.length
         ? ''
@@ -616,8 +641,36 @@ async function submission(id) {
             }
           </div>`
     }
-    <div id="qlist">${qs.map((q) => qCard(q, true)).join('')}</div>`;
+    <div id="qlist">${qs.map((q) => qCard(q, true, pageKeys.length > 0)).join('')}</div>
+    <div id="qlist-empty" class="card hidden"><div class="empty">这次没有错题，全部都对 🎉</div></div>`;
   bindBackBtn();
+
+  /* 默认只显示错题，点「显示全部」把做对的也放出来。
+     纯粹是显示层的显隐，不重新请求、不动数据，切来切去都是瞬间的。
+     一份作业全对（没有错题）时就不筛了，否则页面会白得莫名其妙。 */
+  const applyWrongFilter = () => {
+    const on = onlyWrong && wrongCount > 0;
+    const cards = Array.from(view.querySelectorAll('#qlist .q-card'));
+    cards.forEach((c) => c.classList.toggle('hidden', on && c.dataset.ok === '1'));
+    const shown = cards.filter((c) => !c.classList.contains('hidden')).length;
+    const btn = document.getElementById('toggle-wrong');
+    if (btn) btn.textContent = onlyWrong ? `显示全部（${qs.length}）` : `只看错题（${wrongCount}）`;
+    const note = document.getElementById('qlist-note');
+    if (note) note.textContent = on ? `只显示 ${wrongCount} 道错题` : '';
+    const tip = document.getElementById('qlist-empty');
+    // 一份题都没有时上面已经有「重新批改」那张卡了，这里不要再叠一句
+    if (tip) tip.classList.toggle('hidden', !(qs.length > 0 && shown === 0));
+    const bar = document.getElementById('sp-bar');
+    if (bar) bar.classList.toggle('hidden', shown === 0);
+  };
+  const toggleBtn = document.getElementById('toggle-wrong');
+  if (toggleBtn) {
+    toggleBtn.onclick = () => {
+      onlyWrong = !onlyWrong;
+      applyWrongFilter();
+    };
+  }
+  applyWrongFilter();
   const lessonBtn = document.getElementById('btn-save-lesson');
   if (lessonBtn) {
     lessonBtn.onclick = async () => {
@@ -677,10 +730,23 @@ async function submission(id) {
       try {
         busy('正在按题目位置重新裁截图…');
         const d = await api.get(`/submissions/${id}`);
-        const list = (d.questions || []).map((q) => ({ id: q.id, page: q.page, band: bandOf(q.answer_band) }));
+        const list = (d.questions || []).map((q) => ({
+          id: q.id,
+          page: q.page,
+          band: bandOf(q.answer_band),
+          answer_crop: q.answer_crop,
+        }));
         const n = await attachAnswerImages(id, list);
+        const manual = list.filter((q) => q.answer_crop).length;
         idle();
-        toast(n ? `已重新裁好 ${n} 张题目截图` : '这些题没有记录到位置信息，只能「重新批改」', 6000);
+        toast(
+          n
+            ? `已重新裁好 ${n} 张题目截图${manual ? `（${manual} 道你自己框过的题没动）` : ''}`
+            : manual
+              ? '题目图都是你自己框的，不用重裁'
+              : '这些题没有记录到位置信息，只能「重新批改」',
+          6000,
+        );
         await submission(id);
       } catch (e) {
         idle();
@@ -747,11 +813,23 @@ async function submission(id) {
     document.getElementById('btn-sp-fail').onclick = () => batchVerify(false);
   }
 
+  /* 错题题目图：系统裁歪了就让用户自己拖框重裁一次，从整页原图上裁 */
+  view.querySelectorAll('[data-act=recrop-img]').forEach((b) => {
+    b.onclick = () => {
+      const q = qs.find((x) => x.id === b.dataset.id);
+      if (q) recropQuestionImage(id, q, pageKeys);
+    };
+  });
+
   /* 图片编辑：换一张 / 加一页 / 删除这页 */
   const addPageBtn = document.getElementById('btn-add-page');
   if (addPageBtn) {
     addPageBtn.onclick = () => {
+      // 加页也走「攒页托盘」：可以一次选多张，也可以在裁剪框里点「＋ 再拍一张」接着加
       pendingAddSubId = id;
+      pendingAddRoom = Math.max(0, MAX_PAGES - pages.length);
+      trayFiles = [];
+      trayOrigins = [];
       filePageAdd.value = '';
       // 同步调起（multiple 且不设 capture，系统会同时给「拍照 / 照片图库 / 选取文件」）
       filePageAdd.click();
@@ -788,9 +866,75 @@ async function submission(id) {
 /* ------------------------------------------------ 作业图片编辑 */
 
 let pendingReplace = null; // { subId, pageId, pageNo, qCount }
-let pendingAddSubId = null;
+let pendingAddSubId = null; // 非空 = 这次选的照片是「给已有作业加页」，不是新建一份作业
+let pendingAddRoom = 0; // 这份作业还能再加几页（一份最多 8 页）
 const filePageReplace = document.getElementById('file-page-replace');
 const filePageAdd = document.getElementById('file-page-add');
+
+/**
+ * 错题的题目图裁歪了：把整页原图调出来，让用户自己拖框选「这道题在哪」，存成这道题的图。
+ * 打开时如果系统原来猜过位置（answer_band / 上次手动框的 answer_crop），就先把那块框出来，
+ * 用户在这个基础上拖一拖就行，不用每次都从整张开始找。
+ */
+export async function recropQuestionImage(subId, q, pageKeys, rerender) {
+  const keys = (pageKeys || []).filter(Boolean);
+  if (!keys.length) return toast('这份作业没有存原图，只能点「重新批改」');
+  const idx = Math.max(0, Math.min(keys.length - 1, (Number(q.page) || 1) - 1));
+  busy('正在打开整页原图…');
+  let file;
+  try {
+    const blob = await (await fetch(api.imgUrl(keys[idx]))).blob();
+    file = new File([blob], 'page.jpg', { type: blob.type || 'image/jpeg' });
+  } catch (e) {
+    idle();
+    return toast(`原图打不开：${e.message}`, 8000);
+  }
+  idle();
+  const initial = cropRectOf(q);
+  const out = await cropDialog(file, {
+    title: `框出第 ${q.no} 题的位置`,
+    hint: '拖这个框可以移动，拖四角或四边改大小，把这道题整个框进去；点「全选整张」就是整页。',
+    skipLabel: '取消',
+    raw: false,
+    okLabel: '保存这张',
+    initial,
+  });
+  if (!out) return;
+  busy('保存中…');
+  try {
+    const small = await compressImage(out);
+    const extra = {};
+    if (out.__rect) extra.crop = JSON.stringify(out.__rect);
+    await api.upload(`/questions/${q.id}/answer-image`, small, extra);
+    idle();
+    toast('题目图已换成你框的这张');
+    // 从作业详情进来就重画作业详情，从举一反三页进来就重画那一页（别跳回作业详情）
+    if (typeof rerender === 'function') await rerender();
+    else await submission(subId);
+  } catch (e) {
+    idle();
+    toast(e.message, 8000);
+  }
+}
+
+/** 打开重框弹窗时先框哪里：上次手动框过就用上次的，否则用系统猜的纵向区间 */
+export function cropRectOf(q) {
+  try {
+    if (q.answer_crop) {
+      const r = typeof q.answer_crop === 'string' ? JSON.parse(q.answer_crop) : q.answer_crop;
+      if (r && isFinite(r.y) && isFinite(r.h) && r.h > 0) {
+        return { x: Number(r.x) || 0, y: Number(r.y), w: Number(r.w) || 1, h: Number(r.h) };
+      }
+    }
+  } catch (e) { /* 存坏了就退回按 band 框 */ }
+  const band = bandOf(q.answer_band);
+  if (band) {
+    const y = Math.max(0, Math.min(99, Number(band[0]))) / 100;
+    const h = Math.min(1 - y, Math.max(0.05, (Number(band[1]) - Number(band[0])) / 100));
+    return { x: 0.02, y, w: 0.96, h };
+  }
+  return null;
+}
 
 /** 只批改一页，并把每题的作答区域从这一页的图上裁出来 */
 async function gradeOnePage(subId, pageId, blob, label) {
@@ -842,6 +986,8 @@ async function attachAnswerImages(subId, list, blobs) {
   }
   let n = 0;
   for (const q of list) {
+    // 家长自己框过的题（answer_crop）别再按系统猜的位置覆盖回去，那正是他要改掉的
+    if (q.answer_crop) continue;
     const band = bandOf(q.band);
     if (!band) continue;
     const idx = Math.max(0, Math.min(imgs.length - 1, (Number(q.page) || 1) - 1));
@@ -912,31 +1058,30 @@ filePageReplace.addEventListener('change', async () => {
   }
 });
 
-/** 加页：分两步——先把选中的几张全部传上去（快），再逐页批改。
-    这样选 3 张不用「传一张→等批改→再传下一张」，用户只等一次。 */
-filePageAdd.addEventListener('change', async () => {
-  const files = Array.from(filePageAdd.files || []);
-  filePageAdd.value = '';
-  const subId = pendingAddSubId;
-  pendingAddSubId = null;
-  if (!files.length || !subId) return;
+/**
+ * 给已有作业加页：一次可以选多张（相册多选），也可以在裁剪框里点「＋ 再加一张」接着拍 / 接着选，
+ * 攒够了一起上传、逐页批改。
+ * 只批改新加的这几页：后端 /submissions/:id/pages/:pageId/grade 只处理这一页，
+ * 原来那些页的题目、对错、举一反三记录一行都不会动。
+ */
+async function uploadPagesToSubmission(subId, files) {
+  const list0 = Array.from(files || []).filter(Boolean);
+  if (!list0.length) return;
 
   const uploaded = []; // { pageId, pos, blob }
   const failed = [];
 
   // 阶段一：全部上传（每张 1～2 秒）
-  for (let i = 0; i < files.length; i++) {
-    const f = await cropDialog(files[i], { index: i + 1, total: files.length });
-    if (!f) continue; // 这张不要了，跳过
+  for (let i = 0; i < list0.length; i++) {
     try {
       busy(
-        files.length > 1
-          ? `正在上传第 ${i + 1}/${files.length} 张…`
-          : isHeicFile(f)
+        list0.length > 1
+          ? `正在上传第 ${i + 1}/${list0.length} 张…`
+          : isHeicFile(list0[i])
             ? 'HEIC 照片正在转成 JPG…'
             : '上传中…',
       );
-      const small = await compressImage(f);
+      const small = await compressImage(list0[i]);
       const up = await api.upload(`/submissions/${subId}/pages`, small, {});
       uploaded.push({ pageId: up.page.id, pos: up.page.pos, blob: small });
     } catch (e) {
@@ -945,7 +1090,7 @@ filePageAdd.addEventListener('change', async () => {
     }
   }
 
-  // 阶段二：逐页批改（每页一次模型调用）
+  // 阶段二：逐页批改（每页一次模型调用，只批新加的这几页）
   let total = 0;
   let okPages = 0;
   for (let i = 0; i < uploaded.length; i++) {
@@ -969,8 +1114,22 @@ filePageAdd.addEventListener('change', async () => {
       10000,
     );
   } else {
-    toast(`已加上 ${uploaded.length} 页，共识别出 ${total} 题`);
+    toast(
+      uploaded.length > 1
+        ? `已加上 ${uploaded.length} 页，只批改了新加的这几页，共识别出 ${total} 题`
+        : `已加上 1 页，只批改了新加的这一页，共识别出 ${total} 题`,
+      6000,
+    );
   }
+}
+
+// 加页的照片统一交给托盘攒：多选一次进来，或者一张一张「＋ 再加一张」进来，攒够了再一起传
+filePageAdd.addEventListener('change', () => {
+  const files = Array.from(filePageAdd.files || []);
+  filePageAdd.value = '';
+  if (!files.length) return;
+  if (!pendingAddSubId) return; // 不是从「加一页」进来的，忽略
+  addToTray(files, 'page');
 });
 
 /** 删除某一页。有题就问用户：题目一起删，还是把题目留下 */
@@ -2259,32 +2418,48 @@ function renderShotsTray() {
       </div>`;
     })
     .join('');
-  const canAdd = trayFiles.length < MAX_PAGES;
-  const verb = trayKind === 'shoot' ? '拍' : '选';
+  const cap = trayCap();
+  const canAdd = trayFiles.length < cap;
+  const verb = trayKind === 'shoot' ? '拍' : trayKind === 'page' ? '加' : '选';
+  // 加页那支输入本来就是「拍照 / 图库」二选一，不用再给「换相机 / 换相册」
   const other =
     trayKind === 'shoot'
       ? `<button class="btn sm" id="tray-add-album">🖼 从相册再选几张</button>`
-      : `<button class="btn sm" id="tray-add-camera">📷 现拍一张</button>`;
+      : trayKind === 'page'
+        ? ''
+        : `<button class="btn sm" id="tray-add-camera">📷 现拍一张</button>`;
+  const isAdd = !!pendingAddSubId;
   wrap.innerHTML = `
     <div class="modal-card tray-card">
-      <h3>已经凑了 ${trayFiles.length} 页</h3>
-      <p class="small muted tray-sub">还能继续${verb}，攒够了一次性上传、一次批改。</p>
+      <h3>${isAdd ? `准备加 ${trayFiles.length} 页` : `已经凑了 ${trayFiles.length} 页`}</h3>
+      <p class="small muted tray-sub">${
+        isAdd
+          ? '点「加上去」之后只批改新加的这几页，之前改过的题一道都不会重新批改。'
+          : `还能继续${verb}，攒够了一次性上传、一次批改。`
+      }</p>
       <div class="tray-grid">
         ${cells}
         ${canAdd ? `<button class="tray-add" id="tray-add"><span>＋</span><em>再${verb}一张</em></button>` : ''}
       </div>
-      <div class="hint">${canAdd ? '每张照片算这份作业的一页。点 ✂ 重新框选范围，点 × 删掉这张。' : `一次最多 ${MAX_PAGES} 页，多的分两次交。`}</div>
-      ${canAdd ? `<div class="tray-other">${other}</div>` : ''}
+      <div class="hint">${canAdd ? `每张照片算一页。点 ✂ 重新框选范围，点 × 删掉这张。${isAdd ? '上限 8 页。' : ''}` : `一次最多 ${cap} 页，多的分两次交。`}</div>
+      ${canAdd && other ? `<div class="tray-other">${other}</div>` : ''}
       <div class="row-end" style="margin-top:14px">
         <button class="btn" id="tray-cancel">取消</button>
-        <button class="btn primary" id="tray-go">开始批改（${trayFiles.length} 页）</button>
+        <button class="btn primary" id="tray-go">${isAdd ? `加上去（${trayFiles.length} 页）` : `开始批改（${trayFiles.length} 页）`}</button>
       </div>
     </div>`;
 }
 
-/** 在用户手势里同步调起相机 / 相册（「↻ 重拍 / ↻ 重选」用） */
+/** 这批照片最多能凑几页：新建作业 8 页；给已有作业加页时还要扣掉它已经有的页数 */
+function trayCap() {
+  if (pendingAddSubId) return Math.max(1, Math.min(MAX_PAGES, pendingAddRoom || MAX_PAGES));
+  return MAX_PAGES;
+}
+
+/** 在用户手势里同步调起相机 / 相册（「↻ 重拍 / ↻ 重选」和托盘里的「＋」用） */
 function reopenPicker(kind) {
-  const el = document.getElementById(kind === 'album' ? 'file-homework-album' : 'file-homework');
+  const id = kind === 'album' ? 'file-homework-album' : kind === 'page' ? 'file-page-add' : 'file-homework';
+  const el = document.getElementById(id);
   if (el) el.click();
 }
 
@@ -2295,18 +2470,19 @@ function reopenPicker(kind) {
  */
 async function addToTray(files, kind) {
   if (kind) trayKind = kind;
-  const room = MAX_PAGES - trayFiles.length;
+  const cap = trayCap();
+  const room = cap - trayFiles.length;
   if (room <= 0) {
-    toast(`一次最多 ${MAX_PAGES} 页，这批先上传吧`, 6000);
+    toast(`一次最多 ${cap} 页，这批先上传吧`, 6000);
     return;
   }
   const picked = files.slice(0, room);
-  if (files.length > room) toast(`一次最多 ${MAX_PAGES} 页，多出的 ${files.length - room} 张没加进来`, 6000);
+  if (files.length > room) toast(`一次最多 ${cap} 页，多出的 ${files.length - room} 张没加进来`, 6000);
 
   // 只有「全新的一次上传、且就这一张」时，取消按钮才变成重拍 / 重选
   const freshOne = picked.length === 1 && trayFiles.length === 0;
-  const verb = kind === 'shoot' ? '拍' : '选';
-  const skipLabel = freshOne ? (kind === 'shoot' ? '↻ 重拍' : '↻ 重选') : '不用这张';
+  const verb = kind === 'shoot' ? '拍' : kind === 'page' ? '加' : '选';
+  const skipLabel = freshOne ? (kind === 'shoot' ? '↻ 重拍' : `↻ 重${verb}`) : '不用这张';
 
   let kept = 0;
   let wantMore = false;
@@ -2316,7 +2492,8 @@ async function addToTray(files, kind) {
       total: picked.length,
       skipLabel,
       onSkip: freshOne ? () => reopenPicker(kind) : null,
-      more: trayFiles.length + kept + 1 < MAX_PAGES ? `＋ 再${verb}一张` : '',
+      // 多选时这一张之后还有下一张，就没必要再给「再加一张」了，免得重复
+      more: picked.length > 1 || trayFiles.length + kept + 1 >= cap ? '' : `＋ 再${verb}一张`,
       onMore: () => {
         wantMore = true;
       },
@@ -2331,9 +2508,7 @@ async function addToTray(files, kind) {
     // 全部取消了：托盘里还有别的页就回到托盘，没有就关掉
     if (trayFiles.length) renderShotsTray();
     else {
-      trayFiles = [];
-      trayOrigins = [];
-      closeShotsTray();
+      endTray();
     }
     return;
   }
@@ -2343,10 +2518,19 @@ async function addToTray(files, kind) {
   }
   // 攒够了就别再让用户多点一次「开始批改」，裁完直接上传
   const shots = trayFiles.slice();
+  const subId = pendingAddSubId;
+  endTray();
+  if (subId) uploadPagesToSubmission(subId, shots);
+  else uploadHomeworkFiles(shots);
+}
+
+/** 清空托盘状态（上传前 / 取消时都走这里，免得漏清一半） */
+function endTray() {
   trayFiles = [];
   trayOrigins = [];
+  pendingAddSubId = null;
+  pendingAddRoom = 0;
   closeShotsTray();
-  uploadHomeworkFiles(shots);
 }
 
 // 托盘里的按钮都用事件委托，重渲染后不用重新绑
@@ -2380,7 +2564,7 @@ document.addEventListener('click', async (e) => {
   }
   if (t.closest('#tray-add')) {
     // 必须在这次点击的用户手势里同步调起，iOS 才肯弹相机/相册
-    document.getElementById(trayKind === 'shoot' ? 'file-homework' : 'file-homework-album').click();
+    reopenPicker(trayKind);
     return;
   }
   if (t.closest('#tray-add-camera')) {
@@ -2392,17 +2576,15 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (t.closest('#tray-cancel')) {
-    trayFiles = [];
-    trayOrigins = [];
-    closeShotsTray();
+    endTray();
     return;
   }
   if (t.closest('#tray-go')) {
     const shots = trayFiles.slice();
-    trayFiles = [];
-    trayOrigins = [];
-    closeShotsTray();
-    uploadHomeworkFiles(shots);
+    const subId = pendingAddSubId;
+    endTray();
+    if (subId) uploadPagesToSubmission(subId, shots);
+    else uploadHomeworkFiles(shots);
   }
 });
 

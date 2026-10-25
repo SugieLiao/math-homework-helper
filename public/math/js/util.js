@@ -408,11 +408,15 @@ function compressToJpeg(file, maxSide, quality) {
  * 默认框比图片小一圈（四周留一点边），看得出来这是个可以拖的框。
  * 「全选整张」回到整张；「用原图」跳过裁剪；「不用这张」放弃。
  * 返回 Promise<File|null>：null 表示用户放弃这张照片。
- * opts: { title?, index?, total?, skipLabel?, onSkip?, more?, onMore? }
+ * opts: { title?, index?, total?, skipLabel?, onSkip?, more?, onMore?, raw?, okLabel?, initial? }
  *   skipLabel：「不用这张」的自定义文案（单张上传时用来显示「↻ 重拍 / ↻ 重选」）
  *   onSkip：点「不用这张」时同步回调（还在用户手势里，可以在里面直接调起相机）
  *   more：非空时多显示一个按钮（如「＋ 再拍一张」）——收下这张并继续添加
  *   onMore：点那个按钮时同步回调（只做标记，真正的调起由调用方负责）
+ *   raw：传 false 就藏掉「用原图」（重框题目图时不需要「整页当题目图」这种选项）
+ *   okLabel：「确定」按钮的文案（重框题目图时显示「保存这张」）
+ *   initial：{x,y,w,h} 相对整张图的比例（0~1）。打开时先框出这个范围，
+ *           让用户在这个基础上微调，而不是每次都从「整张」开始。
  */
 export function cropDialog(file, opts = {}) {
   return new Promise((resolve) => {
@@ -422,10 +426,13 @@ export function cropDialog(file, opts = {}) {
       opts.total && opts.total > 1
         ? `第 ${opts.index || 1}/${opts.total} 张 · 选要上传的范围`
         : '选要上传的范围';
+    const showRaw = opts.raw !== false;
     wrap.innerHTML = `
       <div class="modal-card crop-card" role="dialog" aria-modal="true">
         <h3>${esc(opts.title || autoTitle)}</h3>
-        <p class="small muted crop-sub" data-act="sub">拖这个框可以移动，拖四角或四边改大小，只框住要批改的部分；点「全选整张」恢复整张。</p>
+        <p class="small muted crop-sub" data-act="sub">${esc(
+          opts.hint || '拖这个框可以移动，拖四角或四边改大小，只框住要批改的部分；点「全选整张」恢复整张。',
+        )}</p>
         <div class="crop-stage">
           <div class="crop-loading">正在准备图片…</div>
         </div>
@@ -436,8 +443,8 @@ export function cropDialog(file, opts = {}) {
         </div>
         <div class="row-end">
           <button class="btn" data-act="skip">${esc(opts.skipLabel || '不用这张')}</button>
-          <button class="btn" data-act="raw">用原图</button>
-          <button class="btn primary" data-act="ok">确定</button>
+          ${showRaw ? `<button class="btn" data-act="raw">用原图</button>` : ''}
+          <button class="btn primary" data-act="ok">${esc(opts.okLabel || '确定')}</button>
         </div>
       </div>`;
     document.body.appendChild(wrap);
@@ -462,12 +469,24 @@ export function cropDialog(file, opts = {}) {
     let sel = null;
     let drag = null;
     let closed = false;
+    let lastRect = null; // 这次框到的范围（相对整张图的比例），挂在返回的 File 上给调用方存起来
 
     const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+    /** 当前选区换算成「相对整张图的比例」{x,y,w,h}，图片等比缩放所以横竖用同一个比例 */
+    function rectFrac() {
+      if (!img || !sel || !W || !H) return null;
+      return { x: sel.x / W, y: sel.y / H, w: sel.w / W, h: sel.h / H };
+    }
 
     function done(v) {
       if (closed) return;
       closed = true;
+      if (v && lastRect) {
+        try {
+          v.__rect = lastRect;
+        } catch (e) { /* 挂不上去也不影响裁剪结果 */ }
+      }
       document.removeEventListener('pointermove', onMove);
       document.removeEventListener('pointerup', onUp);
       document.removeEventListener('pointercancel', onUp);
@@ -518,6 +537,20 @@ export function cropDialog(file, opts = {}) {
       // 短边的 4%，最小 6px、最大 24px：手机上不会太窄，电脑上也不会缩太多
       const m = Math.round(clamp(Math.min(W, H) * 0.04, 6, 24));
       sel = { x: m, y: m, w: Math.max(MIN, W - m * 2), h: Math.max(MIN, H - m * 2) };
+      apply();
+    }
+
+    /**
+     * 打开时先框出指定范围（相对整张图的比例），让用户在此基础上微调。
+     * 重框题目图时用：系统原来猜的那块先框出来，不对再拖，比从「整张」开始省事。
+     */
+    function initialSel() {
+      const i = opts.initial || {};
+      const w = clamp(Math.round((i.w == null ? 1 : i.w) * W), MIN, W);
+      const h = clamp(Math.round((i.h == null ? 1 : i.h) * H), MIN, H);
+      const x = clamp(Math.round((i.x || 0) * W), 0, W - w);
+      const y = clamp(Math.round((i.y || 0) * H), 0, H - h);
+      sel = { x, y, w, h };
       apply();
     }
 
@@ -584,6 +617,7 @@ export function cropDialog(file, opts = {}) {
 
     function doCrop() {
       if (!img || !sel) return done(decoded || null);
+      lastRect = rectFrac();
       try {
         measure();
         const sc = (img.naturalWidth || W) / (W || 1);
@@ -592,6 +626,7 @@ export function cropDialog(file, opts = {}) {
         const sw = Math.max(1, Math.round(sel.w * sc));
         const sh = Math.max(1, Math.round(sel.h * sc));
         if (sw >= (img.naturalWidth || sw) - 2 && sh >= (img.naturalHeight || sh) - 2) {
+          lastRect = { x: 0, y: 0, w: 1, h: 1 };
           return done(decoded); // 整张就别再压一遍
         }
         const c = document.createElement('canvas');
@@ -640,7 +675,13 @@ export function cropDialog(file, opts = {}) {
         doCrop();
       };
     }
-    wrap.querySelector('[data-act=raw]').onclick = () => done(decoded);
+    const rawBtn = wrap.querySelector('[data-act=raw]');
+    if (rawBtn) {
+      rawBtn.onclick = () => {
+        lastRect = { x: 0, y: 0, w: 1, h: 1 };
+        done(decoded);
+      };
+    }
     wrap.querySelector('[data-act=ok]').onclick = doCrop;
     wrap.addEventListener('click', (e) => {
       if (e.target === wrap) done(null);
@@ -664,7 +705,9 @@ export function cropDialog(file, opts = {}) {
           const ld = stage.querySelector('.crop-loading');
           if (ld) ld.remove();
           measure();
-          defaultSel(); // 默认留一点边，看得出来这是个能拖的框
+          // 指定了初始范围就按它框（重框题目图），否则默认留一点边，看得出来这是个能拖的框
+          if (opts.initial) initialSel();
+          else defaultSel();
           box.classList.remove('hidden');
           const okBtn = wrap.querySelector('[data-act=ok]');
           if (okBtn && okBtn.focus) okBtn.focus();
