@@ -522,8 +522,9 @@ let onlyWrong = true;
 
 /**
  * 作业详情页尾部「上一课 / 下一课」：按大纲顺序（单元 → 课文）把课展平成一条，
- * 找到当前作业所属的课，前后各取一课，跳到那一课的作业列表（#/textbook/l/<id>）。
- * 作业没归类（没有 lesson_id）时，这一栏就不显示——没有「课」谈不上上一课下一课。
+ * 找到当前作业所属的课，前后各取一课。点按钮直接进那一课**最新一份作业的详情页**
+ * （不是作业列表）；那一课还没交过作业就提示。
+ * 作业没归类（没有 lesson_id）时，这一栏不显示——没有「课」谈不上上一课下一课。
  */
 function paintLessonNav(s, units) {
   const el = document.getElementById('lesson-nav');
@@ -545,16 +546,37 @@ function paintLessonNav(s, units) {
   const curLabel = lessonLabel(curName);
   const prevLabel = prev ? lessonLabel(prev) : '';
   const nextLabel = next ? lessonLabel(next) : '';
-  const btn = (label, target, name, disabled) =>
+  const btn = (label, lesson, name, disabled) =>
     disabled
       ? `<button class="btn sm" disabled title="${esc(name)}">${label}</button>`
-      : `<a class="btn sm" href="#/textbook/l/${esc(target)}" title="${esc(name)}">${label}</a>`;
+      : `<button class="btn sm" data-goto-lesson="${esc(lesson.lessonId)}" title="${esc(name)}">${label}</button>`;
   el.innerHTML = `
     <span class="small muted" style="margin-right:8px">当前课：${esc(curName.unitName)} › ${esc(curLabel)}</span>
     <span class="spacer"></span>
-    ${btn('‹ 上一课', prev?.lessonId, prevLabel, !prev)}
-    ${btn('下一课 ›', next?.lessonId, nextLabel, !next)}`;
+    ${btn('‹ 上一课', prev, prevLabel, !prev)}
+    ${btn('下一课 ›', next, nextLabel, !next)}`;
   el.classList.remove('hidden');
+
+  // 点「上一课/下一课」：查那一课的最新作业，直接进详情页
+  el.querySelectorAll('[data-goto-lesson]').forEach((b) => {
+    b.onclick = async () => {
+      const lessonId = b.dataset.gotoLesson;
+      busy('正在找这一课的作业…');
+      try {
+        const d = await api.get(`/submissions?lesson=${encodeURIComponent(lessonId)}`);
+        const list = (d.submissions || []).filter((x) => !x.paper_id);
+        idle();
+        if (!list.length) {
+          toast('这一课还没有作业记录', 5000);
+          return;
+        }
+        location.hash = `#/s/${list[0].id}`;
+      } catch (e) {
+        idle();
+        toast(e.message, 6000);
+      }
+    };
+  });
 }
 
 async function submission(id) {
