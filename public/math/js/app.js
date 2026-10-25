@@ -510,24 +510,20 @@ let onlyWrong = true;
 async function submission(id) {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在打开这份作业…', 3);
-  let data;
-  try {
-    data = await api.get(`/submissions/${id}`);
-  } catch (e) {
-    if (stalePage(epoch)) return;
-    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  // 详情数据和「属于」下拉框的大纲互不依赖，一起发，省一趟 ~800ms 往返
+  const [sr, ur] = await Promise.allSettled([api.get(`/submissions/${id}`), api.get('/textbook')]);
+  if (stalePage(epoch)) return;
+  if (sr.status === 'rejected') {
+    view.innerHTML = `<div class="empty">${esc(sr.reason.message)}</div>`;
     return;
   }
+  const data = sr.value;
   const s = data.submission;
   const qs = data.questions || [];
   const pages = (data.pages || []).filter((p) => p.image_key);
   const pageKeys = pages.map((p) => p.image_key); // 重框题目图时要拿整页原图给用户拖
   const wrongCount = qs.filter((q) => !Number(q.is_correct)).length;
-  let units = [];
-  try {
-    const t = await api.get('/textbook');
-    units = t.units || [];
-  } catch (e) { /* 忽略 */ }
+  const units = ur.status === 'fulfilled' ? ur.value.units || [] : [];
 
   if (stalePage(epoch)) return;
   view.innerHTML = `
@@ -986,7 +982,9 @@ async function attachAnswerImages(subId, list, blobs) {
       }
     }
   }
-  let n = 0;
+  // 先并行裁图（本地 canvas，快），再并行上传（批改完有十来道错题时，
+  // 串行要一次次等往返，并行只花一趟的时间）。
+  const jobs = [];
   for (const q of list) {
     // 家长自己框过的题（answer_crop）别再按系统猜的位置覆盖回去，那正是他要改掉的
     if (q.answer_crop) continue;
@@ -995,14 +993,27 @@ async function attachAnswerImages(subId, list, blobs) {
     const idx = Math.max(0, Math.min(imgs.length - 1, (Number(q.page) || 1) - 1));
     const src = imgs[idx];
     if (!src) continue;
-    const b = await cropBand(src, band);
-    if (!b) continue;
-    try {
-      await api.upload(`/questions/${q.id}/answer-image`, b, {});
-      n += 1;
-    } catch (e) { /* 单张失败不拦主流程 */ }
+    jobs.push({ q, band, src });
   }
-  return n;
+  const cropped = await Promise.all(
+    jobs.map(async (j) => {
+      const b = await cropBand(j.src, j.band);
+      return b ? { id: j.q.id, b } : null;
+    }),
+  );
+  const results = await Promise.all(
+    cropped
+      .filter(Boolean)
+      .map(async (it) => {
+        try {
+          await api.upload(`/questions/${it.id}/answer-image`, it.b, {});
+          return 1;
+        } catch (e) {
+          return 0; // 单张失败不拦主流程
+        }
+      }),
+  );
+  return results.reduce((a, b) => a + b, 0);
 }
 
 /** 换掉某一页的图片。先把图选好（用户手势里调起），再问旧题怎么处理，避免 iOS 拦截 */

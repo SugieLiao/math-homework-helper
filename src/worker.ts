@@ -589,6 +589,31 @@ async function questionWithMastery(env: Env, row: any) {
   return { ...row, variants, mastery: computeMastery(row, variants) };
 }
 
+/**
+ * 给一批题（同一份作业的）一次性挂上举一反三 + 掌握度。
+ * 详情页以前是 `Promise.all(list.map(questionWithMastery))`，每道题查一次变式题，
+ * 24 题 = 24 次 D1 往返。这里改成一条 SQL 按 parent_id 全查、内存分组，只花一趟。
+ */
+async function attachMasteryBatch(env: Env, list: any[]): Promise<any[]> {
+  if (!list.length) return [];
+  const ids = list.map((r) => r.id);
+  const vs = await env.DB.prepare(
+    `SELECT * FROM variants WHERE parent_id IN (${ids.map(() => '?').join(',')}) ORDER BY seq ASC, created_at ASC`,
+  )
+    .bind(...ids)
+    .all<VariantRow>();
+  const byParent = new Map<string, VariantRow[]>();
+  for (const v of vs.results || []) {
+    const a = byParent.get(v.parent_id);
+    if (a) a.push(v);
+    else byParent.set(v.parent_id, [v]);
+  }
+  return list.map((r) => {
+    const variants = byParent.get(r.id) || [];
+    return { ...r, variants, mastery: computeMastery(r, variants) };
+  });
+}
+
 /* ------------------------------------------------------------------- auth */
 
 function cookiePass(req: Request): string | null {
@@ -919,6 +944,7 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
   for (const r of oldQs.results || []) await deleteQuestion(env, r.id);
 
   const created: any[] = [];
+  const insertStmts: any[] = [];
   let seq = 0;
   for (const q of list) {
     seq += 1;
@@ -932,13 +958,13 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
         band = [Math.max(0, Math.min(100, Math.round(a))), Math.max(0, Math.min(100, Math.round(b2)))];
       }
     }
-    await env.DB.prepare(
-      `INSERT INTO questions
-       (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
-        error_reason, solution, knowledge, page, answer_band, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-      .bind(
+    insertStmts.push(
+      env.DB.prepare(
+        `INSERT INTO questions
+         (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
+          error_reason, solution, knowledge, page, answer_band, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).bind(
         qid,
         uid,
         id,
@@ -954,12 +980,14 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
         pageNo,
         band ? JSON.stringify(band) : null,
         now(),
-      )
-      .run();
+      ),
+    );
     // page 必须回给前端：多页作业时前端要按页码取对应那张图来裁作答图，
     // 少了它前端会全部退回第 1 页，第 2 页起的题目就挂上第 1 页的截图。
     created.push({ id: qid, seq, band, page: pageNo });
   }
+  // 一批写入，别逐题 INSERT（一次批 20+ 题就是 20+ 次 D1 往返）
+  await env.DB.batch(insertStmts);
   await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ? AND user_id = ?")
     .bind(id, uid)
     .run();
@@ -990,10 +1018,11 @@ async function renumberQuestionsByPage(env: Env, subId: string): Promise<void> {
   )
     .bind(subId)
     .all<any>();
-  let i = 0;
-  for (const r of rows.results || []) {
-    i += 1;
-    await env.DB.prepare('UPDATE questions SET seq = ? WHERE id = ?').bind(i, r.id).run();
+  const list = rows.results || [];
+  // 一条批量提交，别逐题 UPDATE（一份 24 题就是 24 次往返）
+  if (list.length) {
+    const stmts = list.map((r, i) => env.DB.prepare('UPDATE questions SET seq = ? WHERE id = ?').bind(i + 1, r.id));
+    await env.DB.batch(stmts);
   }
 }
 
@@ -1077,6 +1106,7 @@ async function gradePage(env: Env, subId: string, pageId: string, uid: string): 
   const mx = await env.DB.prepare('SELECT MAX(seq) AS m FROM questions WHERE submission_id = ?').bind(subId).first<any>();
   let seq = Number(mx?.m || 0);
   const created: any[] = [];
+  const insertStmts: any[] = [];
   for (const q of list) {
     seq += 1;
     const qid = uuid();
@@ -1088,13 +1118,13 @@ async function gradePage(env: Env, subId: string, pageId: string, uid: string): 
         band = [Math.max(0, Math.min(100, Math.round(a))), Math.max(0, Math.min(100, Math.round(b2)))];
       }
     }
-    await env.DB.prepare(
-      `INSERT INTO questions
-       (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
-        error_reason, solution, knowledge, page, answer_band, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-    )
-      .bind(
+    insertStmts.push(
+      env.DB.prepare(
+        `INSERT INTO questions
+         (id, user_id, submission_id, seq, no, stem, student_answer, correct_answer, is_correct,
+          error_reason, solution, knowledge, page, answer_band, created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ).bind(
         qid,
         uid,
         subId,
@@ -1110,10 +1140,11 @@ async function gradePage(env: Env, subId: string, pageId: string, uid: string): 
         pageNo,
         band ? JSON.stringify(band) : null,
         now(),
-      )
-      .run();
+      ),
+    );
     created.push({ id: qid, seq, band, page: pageNo });
   }
+  await env.DB.batch(insertStmts);
   // 重批这一页后，本页的题 seq 会排在别的页后面（旧题删掉留下的空档），
   // 按「页 → 页内顺序」重排一次，题目列表才不会一页的题分成两段显示。
   await renumberQuestionsByPage(env, subId);
@@ -2582,23 +2613,25 @@ async function handleApi(
 
   const subMatch = /^\/submissions\/([a-z0-9]+)$/.exec(p);
   if (subMatch && method === 'GET') {
-    const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subMatch[1], uid).first<any>();
+    // 4 条查询互不依赖，一次并行发：作业、题目、页。变式题等拿到题目 id 后单独查一趟。
+    const [sub, qs, pgs] = await Promise.all([
+      env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subMatch[1], uid).first<any>(),
+      env.DB.prepare('SELECT * FROM questions WHERE submission_id = ? ORDER BY seq ASC').bind(subMatch[1]).all<any>(),
+      env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC').bind(subMatch[1]).all<any>(),
+    ]);
     if (!sub) throw new HttpError(404, '提交不存在');
-    const qs = await env.DB.prepare('SELECT * FROM questions WHERE submission_id = ? ORDER BY seq ASC')
-      .bind(sub.id)
-      .all<any>();
     const list = qs.results || [];
-    const questions = await Promise.all(list.map((r) => questionWithMastery(env, r)));
+    // 详情页要返回每道题的举一反三 + 掌握度。以前是一道题查一次变式题（N+1），
+    // 24 题就是 24 次串行 D1 往返，详情页光接口就要 1.7s。改成一次按 parent_id 全查、
+    // 内存分组，跟首页列表一样只花一趟。
+    const questions = await attachMasteryBatch(env, list);
     // 多页作业：把所有页按顺序返回，详情页要一张张显示
-    const pgs = await env.DB.prepare('SELECT * FROM submission_pages WHERE submission_id = ? ORDER BY pos ASC')
-      .bind(sub.id)
-      .all<any>();
     let pages = (pgs.results || []).filter((r: any) => r.image_key);
     if (!pages.length && sub.image_key) {
       // 多页功能上线前的老作业没有页记录：补一条，这样它也能换图 / 加页
       const pid = uuid();
-      await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)')
-        .bind(pid, sub.id, sub.image_key, now())
+      await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,0,?,?,?)')
+        .bind(pid, sub.id, sub.image_key, sub.thumb_key, now())
         .run();
       pages = [{ id: pid, submission_id: sub.id, pos: 0, image_key: sub.image_key }];
     }
