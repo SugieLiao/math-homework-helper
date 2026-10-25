@@ -26,6 +26,19 @@ document.getElementById('pass-ok').addEventListener('click', async () => {
 });
 
 /* ------------------------------------------------ 共享渲染 */
+/**
+ * 课文名带序号。lesson 可能是 {name, sort}（大纲里的课），
+ * 也可能是带了 lesson_name/lesson_sort（作业列表/错题本/组卷 JOIN 结果）
+ * 或 lessonName（paintLessonNav 展平的驼峰字段）的对象。
+ * 返回纯文本（已转义）如「6. 国庆庆典」；没编号就只给名字。
+ */
+export function lessonLabel(lesson) {
+  const name = lesson?.lesson_name ?? lesson?.lessonName ?? lesson?.name ?? '';
+  const sort = lesson?.lesson_sort ?? lesson?.sort;
+  const n = Number(sort);
+  return (n && n > 0 ? `${n}. ` : '') + (name || '');
+}
+
 export function masteryBadge(m) {
   return `<span class="badge ${m.tone}">${esc(m.label)}</span>`;
 }
@@ -344,7 +357,7 @@ async function home(opts = {}) {
     }
     const u = unitMap.get(uKey);
     const lKey = s.lesson_id || '__none';
-    if (!u.lessons.has(lKey)) u.lessons.set(lKey, { name: s.lesson_name || '未归类', items: [] });
+    if (!u.lessons.has(lKey)) u.lessons.set(lKey, { name: s.lesson_name ? lessonLabel(s) : '未归类', items: [] });
     u.lessons.get(lKey).items.push(s);
   });
   unitMap.forEach((u, uKey) => {
@@ -361,7 +374,7 @@ async function home(opts = {}) {
   };
   // 平铺排序（时间 / 错题数）时列表不再按单元分块，行里得自己带上归属，否则看不出是哪一课的
   const placeOf = (s) =>
-    [s.unit_name, s.lesson_name].filter(Boolean).join(' › ') ||
+    [s.unit_name, s.lesson_name ? lessonLabel(s) : ''].filter(Boolean).join(' › ') ||
     (s.paper_textbook_name ? `${s.paper_textbook_name}（未指定单元）` : '未归类');
   const rowHtml = (s, showPlace = false) => {
     const isPaper = !!s.paper_id;
@@ -518,7 +531,7 @@ function paintLessonNav(s, units) {
   const flat = [];
   for (const u of units || []) {
     for (const l of u.lessons || []) {
-      flat.push({ lessonId: l.id, lessonName: l.name, unitName: u.name });
+      flat.push({ lessonId: l.id, lessonName: l.name, sort: l.sort, unitName: u.name });
     }
   }
   const cur = s.lesson_id ? flat.findIndex((x) => x.lessonId === s.lesson_id) : -1;
@@ -529,15 +542,18 @@ function paintLessonNav(s, units) {
   const prev = flat[cur - 1];
   const next = flat[cur + 1];
   const curName = flat[cur];
+  const curLabel = lessonLabel(curName);
+  const prevLabel = prev ? lessonLabel(prev) : '';
+  const nextLabel = next ? lessonLabel(next) : '';
   const btn = (label, target, name, disabled) =>
     disabled
-      ? `<button class="btn sm" disabled>${label}</button>`
-      : `<a class="btn sm" href="#/textbook/l/${esc(target)}">${label}</a>`;
+      ? `<button class="btn sm" disabled title="${esc(name)}">${label}</button>`
+      : `<a class="btn sm" href="#/textbook/l/${esc(target)}" title="${esc(name)}">${label}</a>`;
   el.innerHTML = `
-    <span class="small muted" style="margin-right:8px">当前课：${esc(curName.unitName)} › ${esc(curName.lessonName)}</span>
+    <span class="small muted" style="margin-right:8px">当前课：${esc(curName.unitName)} › ${esc(curLabel)}</span>
     <span class="spacer"></span>
-    ${btn('‹ 上一课', prev?.lessonId, prev?.lessonName, !prev)}
-    ${btn('下一课 ›', next?.lessonId, next?.lessonName, !next)}`;
+    ${btn('‹ 上一课', prev?.lessonId, prevLabel, !prev)}
+    ${btn('下一课 ›', next?.lessonId, nextLabel, !next)}`;
   el.classList.remove('hidden');
 }
 
@@ -615,7 +631,7 @@ async function submission(id) {
               (u) =>
                 `<optgroup label="${esc(u.name)}">${u.lessons
                   .map(
-                    (l) => `<option value="${esc(l.id)}" ${s.lesson_id === l.id ? 'selected' : ''}>${esc(l.name)}</option>`,
+                    (l) => `<option value="${esc(l.id)}" ${s.lesson_id === l.id ? 'selected' : ''}>${esc(lessonLabel(l))}</option>`,
                   )
                   .join('')}</optgroup>`,
             )
@@ -1255,7 +1271,7 @@ async function wrongBook() {
     uKey: q.unit_id || '__none',
     uName: q.unit_name || '未归类',
     lKey: q.lesson_id || '__none',
-    lName: q.lesson_name || '未归类',
+    lName: q.lesson_name ? lessonLabel(q) : '未归类',
   });
 
   const blocks = [];
@@ -1286,7 +1302,7 @@ async function wrongBook() {
         ${q.answer_image_key ? `<img class="ans-img zoomable" src="${api.imgUrl(q.answer_image_key)}" alt="作答图片" />` : ''}
         ${q.error_reason ? `<div class="solbox"><div class="t">错在哪里</div><pre class="sol">${esc(q.error_reason)}</pre></div>` : ''}
         <div class="row wrap">
-          <span class="small muted">来源：${fmtDate(q.sub_created_at)} 的作业${q.lesson_name ? ` · ${esc(q.lesson_name)}` : q.unit_name ? ` · ${esc(q.unit_name)}` : ' · 未归类'}</span>
+          <span class="small muted">来源：${fmtDate(q.sub_created_at)} 的作业${q.lesson_name ? ` · ${esc(lessonLabel(q))}` : q.unit_name ? ` · ${esc(q.unit_name)}` : ' · 未归类'}</span>
           <span class="spacer"></span>
           <button class="btn sm" data-recrop="${q.id}">${q.answer_image_key ? '✂ 重框题目图' : '🖼 框出题目图'}</button>
           <a class="btn sm" href="#/q/${q.id}">举一反三</a>
@@ -1483,7 +1499,7 @@ async function composePage() {
 
   const srcOf = (q) => {
     const when = q.sub_created_at ? `${fmtDate(q.sub_created_at)} 的作业` : '来源不明';
-    const where = q.lesson_name || q.unit_name || '未归类';
+    const where = (q.lesson_name ? lessonLabel(q) : '') || q.unit_name || '未归类';
     // 变式题要标清它是哪道母题举一反三出来的，否则待组卷里看不出出处
     return q.kind === 'variant' ? `母题 ${q.parent_no ?? ''} 的举一反三 · ${when} · ${where}` : `${when} · ${where}`;
   };
@@ -1513,7 +1529,7 @@ async function composePage() {
   };
 
   const paperRow = (p) => {
-    const place = [p.textbook_name, p.unit_name, p.lesson_name].filter(Boolean).join(' › ');
+    const place = [p.textbook_name, p.unit_name, p.lesson_name ? lessonLabel(p) : ''].filter(Boolean).join(' › ');
     const state =
       p.status !== 'final'
         ? '<span class="badge gray">草稿</span>'

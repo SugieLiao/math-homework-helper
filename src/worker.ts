@@ -713,7 +713,7 @@ async function textbookTree(env: Env, uid: string, textbookId?: string): Promise
     is_custom: !!Number(u.is_custom),
     lessons: lessons
       .filter((l) => l.unit_id === u.id)
-      .map((l) => ({ id: l.id, name: l.name, is_custom: !!Number(l.is_custom) })),
+      .map((l) => ({ id: l.id, name: l.name, is_custom: !!Number(l.is_custom), sort: Number(l.sort) || 0 })),
   }));
 }
 
@@ -1696,7 +1696,7 @@ async function handleApi(
     // 带上作业归属（教材 / 单元 / 课文），错题本才能按单元课文分组、并注明来源
     let sql =
       `SELECT q.*, s.created_at AS sub_created_at, s.image_key AS sub_image_key,
-              s.lesson_id AS lesson_id, l.name AS lesson_name,
+              s.lesson_id AS lesson_id, l.name AS lesson_name, l.sort AS lesson_sort,
               u.id AS unit_id, u.name AS unit_name,
               t.id AS textbook_id, t.name AS textbook_name
        FROM questions q
@@ -1787,7 +1787,7 @@ async function handleApi(
       `SELECT pq.id AS queue_id, pq.created_at AS queued_at, 'question' AS kind,
               q.id AS id, q.no AS no, q.stem AS stem, q.correct_answer AS answer,
               q.knowledge AS knowledge, q.is_correct AS is_correct, q.submission_id AS submission_id,
-              s.created_at AS sub_created_at, l.name AS lesson_name,
+              s.created_at AS sub_created_at, l.name AS lesson_name, l.sort AS lesson_sort,
               u.id AS unit_id, u.name AS unit_name, t.id AS textbook_id, t.name AS textbook_name,
               NULL AS parent_no, NULL AS variant_seq, NULL AS difficulty
          FROM paper_queue pq
@@ -1886,7 +1886,7 @@ async function handleApi(
   if (p === '/papers' && method === 'GET') {
     const rows = await env.DB.prepare(
       `SELECT p.*, (SELECT COUNT(*) FROM paper_items i WHERE i.paper_id = p.id) AS item_count,
-              t.name AS textbook_name, u.name AS unit_name, l.name AS lesson_name,
+              t.name AS textbook_name, u.name AS unit_name, l.name AS lesson_name, l.sort AS lesson_sort,
               s.status AS sub_status, s.id AS sub_id
          FROM papers p
          LEFT JOIN textbooks t ON t.id = p.textbook_id
@@ -2373,7 +2373,7 @@ async function handleApi(
     // 组卷确认后生成的 kind='paper' 条目也算作业（未作答时 status='pending'）
     // 归属可能有两条路：作业/课文 → lessons.unit_id；组卷只选了单元没选课文时 → submissions.unit_id。
     // 用 eff_* 统一算出来，前端不用关心它属于哪种情况。
-    let sql = `SELECT s.*, l.name AS lesson_name,
+    let sql = `SELECT s.*, l.name AS lesson_name, l.sort AS lesson_sort,
         COALESCE(l.unit_id, s.unit_id) AS eff_unit_id,
         COALESCE(u.name, su.name) AS eff_unit_name,
         COALESCE(u.textbook_id, su.textbook_id, s.textbook_id) AS eff_textbook_id,

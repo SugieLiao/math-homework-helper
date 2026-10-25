@@ -163,7 +163,7 @@ function drawTree() {
               ? u.lessons
                   .map(
                     (l) => `<div class="pf-row" style="padding:7px 0">
-                      <div class="pf-main"><span>${esc(l.name)}</span>
+                      <div class="pf-main"><span>${l.sort ? `<span class="small muted" style="margin-right:6px">${esc(String(l.sort))}.</span>` : ''}${esc(l.name)}</span>
                         ${l.is_custom ? '<span class="tag">自建</span>' : ''}
                       </div>
                       <div class="pf-ops">
