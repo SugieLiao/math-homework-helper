@@ -2334,29 +2334,59 @@ async function handleApi(
     sql += ' ORDER BY s.created_at DESC LIMIT 200';
     const rows = await env.DB.prepare(sql).bind(...binds).all<any>();
     const subs = rows.results || [];
+
+    /* 题目 / 变式题 / 页数 / 卷子题数 一次拿齐，在内存里分组。
+       以前是「每份作业查一次题目、每道题再查一次变式题」——3 份作业 63 题就是 70 次 D1 往返，
+       实测首页要 25 秒。现在固定 4 条查询（并行），只花一次往返的时间。
+       注意：这两条 SQL 只取 computeMastery 真正用到的字段，别顺手改成 SELECT *
+       （题目逐年累积，长文本会把首页请求拖大）。 */
+    const [qRes, vRes, pgRes, piRes] = await Promise.all([
+      env.DB.prepare('SELECT id, submission_id, is_correct, seq FROM questions WHERE user_id = ?')
+        .bind(uid)
+        .all<any>(),
+      env.DB.prepare('SELECT parent_id, status, done_at FROM variants WHERE user_id = ?')
+        .bind(uid)
+        .all<any>(),
+      env.DB.prepare(
+        'SELECT submission_id, COUNT(*) AS c FROM submission_pages WHERE submission_id IN (SELECT id FROM submissions WHERE user_id = ?) GROUP BY submission_id',
+      )
+        .bind(uid)
+        .all<any>(),
+      env.DB.prepare('SELECT paper_id, COUNT(*) AS c FROM paper_items WHERE user_id = ? GROUP BY paper_id')
+        .bind(uid)
+        .all<any>(),
+    ]);
+    const qBySub = new Map<string, any[]>();
+    for (const q of qRes.results || []) {
+      const a = qBySub.get(q.submission_id);
+      if (a) a.push(q);
+      else qBySub.set(q.submission_id, [q]);
+    }
+    const vByParent = new Map<string, any[]>();
+    for (const v of vRes.results || []) {
+      const a = vByParent.get(v.parent_id);
+      if (a) a.push(v);
+      else vByParent.set(v.parent_id, [v]);
+    }
+    const pgCount = new Map<string, number>();
+    for (const r of pgRes.results || []) pgCount.set(r.submission_id, Number(r.c || 0));
+    const piCount = new Map<string, number>();
+    for (const r of piRes.results || []) piCount.set(r.paper_id, Number(r.c || 0));
+
     const out = [];
     for (const s of subs) {
-      const qs = await env.DB.prepare('SELECT * FROM questions WHERE submission_id = ? ORDER BY seq ASC')
-        .bind(s.id)
-        .all<any>();
-      const list = qs.results || [];
+      const list = (qBySub.get(s.id) || []).sort((a, b) => (Number(a.seq) || 0) - (Number(b.seq) || 0));
       let passed = 0;
       for (const q of list) {
-        const vs = await env.DB.prepare('SELECT * FROM variants WHERE parent_id = ?').bind(q.id).all<VariantRow>();
-        const m = computeMastery(q, vs.results || []);
+        // computeMastery 只读 status / done_at（selected 只影响「选了 N 题」的显示，列表用不到）
+        const vs = (vByParent.get(q.id) || []) as any as VariantRow[];
+        const m = computeMastery(q, vs);
         if (m.passed) passed += 1;
       }
-      const pgc = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
-        .bind(s.id)
-        .first<any>();
+      const pgc = pgCount.get(s.id) || 0;
       // 卷子还没交答案时没有题目，题量按卷子本身的题目数显示
       let total = list.length;
-      if (!total && s.paper_id) {
-        const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM paper_items WHERE paper_id = ?')
-          .bind(s.paper_id)
-          .first<any>();
-        total = Number(cnt?.c || 0);
-      }
+      if (!total && s.paper_id) total = piCount.get(s.paper_id) || 0;
       out.push({
         ...s,
         // 统一成前端一直用的字段名（作业走课文、组卷走 submissions.unit_id，两条路都折算到这里）
@@ -2368,7 +2398,7 @@ async function handleApi(
         wrong: list.filter((q) => Number(q.is_correct) === 0).length,
         passed,
         paper_title: s.paper_title || '',
-        pages: Number(pgc?.c || 0) || (s.image_key ? 1 : 0),
+        pages: Number(pgc) || (s.image_key ? 1 : 0),
         // 作答状态按「有没有题目」判定，跟是不是组卷无关：
         // 组卷刚发出去、或任何一份还没做出来的作业，都是 pending（未作答）。
         state:

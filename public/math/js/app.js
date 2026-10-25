@@ -201,14 +201,25 @@ async function home(opts = {}) {
     tbId = textbooks[0]?.id || '';
   }
   const lessonFilter = opts.lesson || '';
-  try {
-    const t = await api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook');
-    units = t.units || [];
-  } catch (e) { /* 大纲拉不到不影响主流程 */ }
   // 排序方式：没传就用上次选的，默认按大纲顺序
   const sortMode = opts.sort || localStorage.getItem(SORT_KEY) || 'syllabus';
 
   if (stalePage(epoch)) return;
+
+  // 大纲（只喂筛选下拉框）和作业列表互不依赖，一起发，省一趟来回
+  const qs = lessonFilter
+    ? `?lesson=${encodeURIComponent(lessonFilter)}`
+    : tbId
+      ? `?textbook=${encodeURIComponent(tbId)}`
+      : '';
+  const [ur, sr] = await Promise.allSettled([
+    api.get(tbId ? `/textbook?textbook=${encodeURIComponent(tbId)}` : '/textbook'),
+    api.get(`/submissions${qs}`),
+  ]);
+  if (stalePage(epoch)) return;
+  // 大纲拉不到不影响主流程，作业列表拉不到才提示
+  if (ur.status === 'fulfilled') units = (ur.value && ur.value.units) || [];
+  const subErr = sr.status === 'rejected' ? sr.reason : null;
 
   const lessonOptionsFor = (list) =>
     list
@@ -284,20 +295,12 @@ async function home(opts = {}) {
   };
   if (fromTextbook) bindBackBtn('#/textbook');
 
-  let data;
-  try {
-    const qs = lessonFilter
-      ? `?lesson=${encodeURIComponent(lessonFilter)}`
-      : tbId
-        ? `?textbook=${encodeURIComponent(tbId)}`
-        : '';
-    data = await api.get(`/submissions${qs}`);
-  } catch (e) {
-    if (stalePage(epoch)) return;
+  if (subErr) {
     const errList = document.getElementById('list');
-    if (errList) errList.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+    if (errList) errList.innerHTML = `<div class="empty">${esc(subErr.message || '加载失败')}</div>`;
     return;
   }
+  const data = sr.value || {};
   if (stalePage(epoch)) return;
   const subs = data.submissions || [];
   const total = subs.reduce((a, s) => a + (s.total || 0), 0);
