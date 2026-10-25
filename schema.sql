@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   textbook_id TEXT,                   -- 归属教材（kind=paper 且没选到具体课文时用；教材必选，课文可选）
   paper_id    TEXT,                   -- kind=paper 时对应的卷子 id
   image_key   TEXT,                   -- R2 原图（卷子未作答时为 NULL）
+  thumb_key   TEXT,                   -- R2 缩略图（320px，首页列表用；旧数据回填前为 NULL，前端回退用原图）
   status      TEXT DEFAULT 'graded',  -- grading | graded | error | pending（卷子已发未作答）
   error_msg   TEXT,
   note        TEXT,
@@ -108,6 +109,7 @@ CREATE TABLE IF NOT EXISTS submission_pages (
   submission_id TEXT NOT NULL,
   pos           INTEGER DEFAULT 0,    -- 第几页，从 0 开始
   image_key     TEXT,                 -- R2 原图
+  thumb_key     TEXT,                 -- R2 缩略图（320px）
   created_at    TEXT
 );
 

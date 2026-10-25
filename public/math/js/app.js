@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode, getUserId, setUserId } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, promptDialog, openImage } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, promptDialog, openImage, makeThumb } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -366,8 +366,10 @@ async function home(opts = {}) {
   const rowHtml = (s, showPlace = false) => {
     const isPaper = !!s.paper_id;
     const href = isPaper ? `#/paper/${s.paper_id}` : `#/s/${s.id}`;
-    const thumb = s.image_key
-      ? `<img class="sub-thumb zoomable" src="${api.imgUrl(s.image_key)}" alt="作业原图" />`
+    // 缩略图优先用 thumb/*（320px 小图），旧数据还没回填时退回用原图
+    const thumbKey = s.thumb_key || s.image_key;
+    const thumb = thumbKey
+      ? `<img class="sub-thumb zoomable" src="${api.imgUrl(thumbKey)}" alt="作业原图" />`
       : `<div class="sub-thumb sub-thumb-ph">📄</div>`;
     const title = isPaper ? `📝 ${esc(s.paper_title || '练习卷')}` : fmtDate(s.created_at);
     const pageTag = Number(s.pages) > 1 ? ` · ${s.pages} 页` : '';
@@ -1041,7 +1043,10 @@ filePageReplace.addEventListener('change', async () => {
   try {
     busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
     const small = await compressImage(picked);
-    await api.upload(`/submissions/${info.subId}/pages/${info.pageId}`, small, {}, 'PUT');
+    const extra = {};
+    const thumb = await makeThumb(picked);
+    if (thumb) extra.thumb = thumb;
+    await api.upload(`/submissions/${info.subId}/pages/${info.pageId}`, small, extra, 'PUT');
     if (keep) {
       idle();
       toast(`第 ${info.pageNo} 页已换好，题目没动`);
@@ -1082,7 +1087,10 @@ async function uploadPagesToSubmission(subId, files) {
             : '上传中…',
       );
       const small = await compressImage(list0[i]);
-      const up = await api.upload(`/submissions/${subId}/pages`, small, {});
+      const extra = {};
+      const thumb = await makeThumb(list0[i]);
+      if (thumb) extra.thumb = thumb;
+      const up = await api.upload(`/submissions/${subId}/pages`, small, extra);
       uploaded.push({ pageId: up.page.id, pos: up.page.pos, blob: small });
     } catch (e) {
       // 一张失败不要拖累其它几张（多选时经常混着一张特殊格式的）
@@ -2346,6 +2354,9 @@ async function uploadHomeworkFiles(files) {
       // 归类选的是弹窗里那一课，不是首页筛选；第二页起带 submission_id 追加到同一份作业
       const extra = { lesson_id: pendingLessonId || '' };
       if (subId) extra.submission_id = subId;
+      // 首页列表缩略图：顺带生成一张 320px 小图，失败也不拦主流程
+      const thumb = await makeThumb(list0[i]);
+      if (thumb) extra.thumb = thumb;
       const up = await api.upload('/homework/upload', small, extra);
       subId = up.id;
     }
@@ -2616,7 +2627,10 @@ async function handlePaperFile(input) {
   try {
     busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
     const small = await compressImage(picked);
-    const up = await api.upload(`/papers/${pid}/answer`, small, {});
+    const extra = {};
+    const thumb = await makeThumb(picked);
+    if (thumb) extra.thumb = thumb;
+    const up = await api.upload(`/papers/${pid}/answer`, small, extra);
     subId = up.id;
     busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
     const graded = await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);

@@ -363,6 +363,20 @@ export function compressImage(file, maxSide = 1600, quality = 0.85) {
   })();
 }
 
+/**
+ * 生成首页列表用的缩略图（320px 小 JPEG）。
+ * 复用 compressImage 的 HEIC 转码 + 压缩管线，只是把最长边压到 320、画质更低。
+ * 失败返回 null（列表退回用原图），不打断主上传流程。
+ */
+export async function makeThumb(file) {
+  try {
+    const jpg = await compressImage(file, 320, 0.6);
+    return new File([jpg], 'thumb.jpg', { type: 'image/jpeg' });
+  } catch (e) {
+    return null;
+  }
+}
+
 function compressToJpeg(file, maxSide, quality) {
   return new Promise((resolve, reject) => {
     const img = new Image();

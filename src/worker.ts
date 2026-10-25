@@ -90,6 +90,22 @@ function contentTypeOf(key: string): string {
   return 'image/jpeg';
 }
 
+/**
+ * 首页列表缩略图：客户端在上传时顺带生成一张 320px 小图，走「thumb」表单字段传上来。
+ * 这里把它存成 thumb/* key 并返回；没传就返回 null（旧客户端 / 兼容），前端列表会退回用原图。
+ */
+async function storeThumb(env: Env, form: FormData, baseKey: string): Promise<string | null> {
+  const thumb = form.get('thumb') as File | null;
+  if (!thumb || !thumb.size) return null;
+  try {
+    const key = `thumb/${baseKey}.jpg`;
+    await env.IMAGES.put(key, await thumb.arrayBuffer(), { httpMetadata: { contentType: 'image/jpeg' } });
+    return key;
+  } catch (e) {
+    return null; // 缩略图失败不影响主流程，列表退回用原图
+  }
+}
+
 /* --------------------------------------------------------------- settings */
 
 interface Settings {
@@ -748,12 +764,13 @@ async function deleteSubmission(env: Env, id: string): Promise<void> {
     .bind(id)
     .all<any>();
   const ids = (qs.results || []).map((r) => r.id);
-  const keys: string[] = [sub.image_key].filter(Boolean);
-  const pgs = await env.DB.prepare('SELECT image_key FROM submission_pages WHERE submission_id = ?')
+  const keys: string[] = [sub.image_key, sub.thumb_key].filter(Boolean);
+  const pgs = await env.DB.prepare('SELECT image_key, thumb_key FROM submission_pages WHERE submission_id = ?')
     .bind(id)
     .all<any>();
   (pgs.results || []).forEach((r: any) => {
     if (r.image_key) keys.push(r.image_key);
+    if (r.thumb_key) keys.push(r.thumb_key);
   });
   (qs.results || []).forEach((r) => {
     if (r.answer_image_key) keys.push(r.answer_image_key);
@@ -950,7 +967,7 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
 }
 
 /** 读上传的表单图片，统一做 HEIC / 大小校验（图片编辑接口共用） */
-async function readImageForm(req: Request): Promise<{ buf: ArrayBuffer; ext: string }> {
+async function readImageForm(req: Request): Promise<{ buf: ArrayBuffer; ext: string; thumb: File | null }> {
   const form = await req.formData();
   const file = form.get('file') as File | null;
   if (!file) throw new HttpError(400, '没有收到图片');
@@ -962,7 +979,8 @@ async function readImageForm(req: Request): Promise<{ buf: ArrayBuffer; ext: str
     );
   }
   if (file.size > 10 * 1024 * 1024) throw new HttpError(400, '图片太大了（超过 10MB），请压缩或截图后再传。');
-  return { buf: await file.arrayBuffer(), ext };
+  const thumb = form.get('thumb') as File | null;
+  return { buf: await file.arrayBuffer(), ext, thumb: thumb && thumb.size ? thumb : null };
 }
 
 /** 按「页 → 页内顺序」重排 seq（删页/加页后调用，保证题目按页顺序编号） */
@@ -1550,10 +1568,11 @@ async function handleApi(
       const pos = Number(cnt?.c || 0);
       const key = `page/${appendTo}-${pos}.${ext}`;
       await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
+      const thumbKey = await storeThumb(env, form, `${appendTo}-${pos}`);
       await env.DB.prepare(
-        'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,?,?,?)',
+        'INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,?,?,?,?)',
       )
-        .bind(uuid(), appendTo, pos, key, now())
+        .bind(uuid(), appendTo, pos, key, thumbKey, now())
         .run();
       return json({ id: appendTo, image_key: key, pos });
     }
@@ -1561,15 +1580,16 @@ async function handleApi(
     const id = uuid();
     const key = `orig/${id}.${ext}`;
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
+    const thumbKey = await storeThumb(env, form, id);
     await env.DB.prepare(
-      "INSERT INTO submissions (id, user_id, kind, lesson_id, image_key, status, created_at) VALUES (?,?,'homework',?,?, 'grading', ?)",
+      "INSERT INTO submissions (id, user_id, kind, lesson_id, image_key, thumb_key, status, created_at) VALUES (?,?,'homework',?,?,?, 'grading', ?)",
     )
-      .bind(id, uid, lessonId, key, now())
+      .bind(id, uid, lessonId, key, thumbKey, now())
       .run();
     await env.DB.prepare(
-      'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)',
+      'INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,0,?,?,?)',
     )
-      .bind(uuid(), id, key, now())
+      .bind(uuid(), id, key, thumbKey, now())
       .run();
     return json({ id, image_key: key, pos: 0 });
   }
@@ -2294,14 +2314,17 @@ async function handleApi(
 
     const key = `orig/${subId}.${ext}`;
     await env.IMAGES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: contentTypeOf(key) } });
-    await env.DB.prepare("UPDATE submissions SET image_key = ?, status = 'grading', error_msg = NULL WHERE id = ? AND user_id = ?")
-      .bind(key, subId, uid)
+    const thumbKey = await storeThumb(env, form, subId);
+    await env.DB.prepare(
+      "UPDATE submissions SET image_key = ?, thumb_key = ?, status = 'grading', error_msg = NULL WHERE id = ? AND user_id = ?",
+    )
+      .bind(key, thumbKey, subId, uid)
       .run();
     await env.DB.prepare('DELETE FROM submission_pages WHERE submission_id = ?').bind(subId).run();
     await env.DB.prepare(
-      'INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,0,?,?)',
+      'INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,0,?,?,?)',
     )
-      .bind(uuid(), subId, key, now())
+      .bind(uuid(), subId, key, thumbKey, now())
       .run();
     return json({ id: subId, image_key: key });
   }
@@ -2440,7 +2463,7 @@ async function handleApi(
     const subId = subPagesMatch[1];
     const sub = await env.DB.prepare('SELECT * FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
     if (!sub) throw new HttpError(404, '这份作业不存在，刷新一下再试');
-    const { buf, ext } = await readImageForm(req);
+    const { buf, ext, thumb } = await readImageForm(req);
     const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
       .bind(subId)
       .first<any>();
@@ -2449,12 +2472,17 @@ async function handleApi(
     const pageId = uuid();
     const key = `page/${subId}-${pageId}.${ext}`;
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
-    await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, created_at) VALUES (?,?,?,?,?)')
-      .bind(pageId, subId, n, key, now())
+    let thumbKey: string | null = null;
+    if (thumb) {
+      thumbKey = `thumb/${subId}-${pageId}.jpg`;
+      await env.IMAGES.put(thumbKey, await thumb.arrayBuffer(), { httpMetadata: { contentType: 'image/jpeg' } }).catch(() => { thumbKey = null; });
+    }
+    await env.DB.prepare('INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,?,?,?,?)')
+      .bind(pageId, subId, n, key, thumbKey, now())
       .run();
     // 组卷作业原本没有 image_key，列表缩略图要指到第一页
     if (!sub.image_key) {
-      await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?').bind(key, subId).run();
+      await env.DB.prepare('UPDATE submissions SET image_key = ?, thumb_key = ? WHERE id = ?').bind(key, thumbKey, subId).run();
     }
     return json({ page: { id: pageId, pos: n, image_key: key } });
   }
@@ -2469,14 +2497,20 @@ async function handleApi(
       .bind(pageId, subId)
       .first<any>();
     if (!pg) throw new HttpError(404, '这一页不存在，刷新一下再试');
-    const { buf, ext } = await readImageForm(req);
+    const { buf, ext, thumb } = await readImageForm(req);
     // key 里带一段随机：图片 URL 是按 key 拼的，key 不变的话浏览器会一直放旧图（换完看不到新照片）
     const key = `page/${subId}-${pageId}-${uuid().slice(0, 6)}.${ext}`;
     await env.IMAGES.put(key, buf, { httpMetadata: { contentType: contentTypeOf(key) } });
-    await env.DB.prepare('UPDATE submission_pages SET image_key = ? WHERE id = ?').bind(key, pageId).run();
+    let thumbKey: string | null = null;
+    if (thumb) {
+      thumbKey = `thumb/${subId}-${pageId}-${uuid().slice(0, 6)}.jpg`;
+      await env.IMAGES.put(thumbKey, await thumb.arrayBuffer(), { httpMetadata: { contentType: 'image/jpeg' } }).catch(() => { thumbKey = null; });
+    }
+    await env.DB.prepare('UPDATE submission_pages SET image_key = ?, thumb_key = ? WHERE id = ?').bind(key, thumbKey, pageId).run();
     if (pg.image_key && pg.image_key !== key) await env.IMAGES.delete(pg.image_key).catch(() => {});
+    if (pg.thumb_key && pg.thumb_key !== thumbKey) await env.IMAGES.delete(pg.thumb_key).catch(() => {});
     if (Number(pg.pos) === 0) {
-      await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?').bind(key, subId).run();
+      await env.DB.prepare('UPDATE submissions SET image_key = ?, thumb_key = ? WHERE id = ?').bind(key, thumbKey, subId).run();
     }
     return json({ page: { id: pageId, pos: Number(pg.pos), image_key: key } });
   }
@@ -2515,6 +2549,7 @@ async function handleApi(
 
     await env.DB.prepare('DELETE FROM submission_pages WHERE id = ?').bind(pageId).run();
     if (target.image_key) await env.IMAGES.delete(target.image_key).catch(() => {});
+    if (target.thumb_key) await env.IMAGES.delete(target.thumb_key).catch(() => {});
 
     // 后面的页依次前移，并把它们名下题目的 page 一起改掉（要用旧值做映射，不能边改边查）
     const rest = all.filter((r: any) => r.id !== pageId);
@@ -2534,8 +2569,8 @@ async function handleApi(
       }
     }
     await renumberQuestionsByPage(env, subId);
-    await env.DB.prepare('UPDATE submissions SET image_key = ? WHERE id = ?')
-      .bind(rest[0]?.image_key || null, subId)
+    await env.DB.prepare('UPDATE submissions SET image_key = ?, thumb_key = ? WHERE id = ?')
+      .bind(rest[0]?.image_key || null, rest[0]?.thumb_key || null, subId)
       .run();
     return json({ ok: true, deleted_questions: keep ? 0 : qids.length, kept_questions: keep ? qids.length : 0 });
   }

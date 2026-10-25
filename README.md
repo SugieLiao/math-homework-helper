@@ -191,7 +191,7 @@ curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/workers/routes
 | GET/POST | `/math/api/users` | 用户列表（含每人作业数/题数）/ 新增用户（可 `copy_from` 复制大纲与模型设置） |
 | PATCH/DELETE | `/math/api/users/:id` | 改名 / 删除用户（连带其全部数据） |
 | POST | `/math/api/test-model` | 测试大模型连通性 |
-| POST | `/math/api/homework/upload` | 上传作业照片 |
+| POST | `/math/api/homework/upload` | 上传作业照片（可带 `thumb` 字段：客户端生成的 320px 缩略图，存 R2 `thumb/*` 供首页列表用） |
 | POST | `/math/api/homework/:id/grade` | 批改（识别题目 + 判对错 + 分析） |
 | POST | `/math/api/questions/:id/answer-image` | 上传作答裁剪图 |
 | GET | `/math/api/submissions` `/:id` | 作业列表 / 详情 |
