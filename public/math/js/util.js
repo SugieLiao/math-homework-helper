@@ -644,13 +644,14 @@ export function cropDialog(file, opts = {}) {
       if (e.touches.length !== 2 || !img || !fitW) return;
       const [a, b] = e.touches;
       const ir = img.getBoundingClientRect();
-      const sr = stage.getBoundingClientRect();
       pinch = {
         d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY) || 1,
         w0: ir.width || fitW,
         // 两指中心当时压住的是图片上的哪一点（wrap 坐标，缩放时按宽度比例跟着变）
         cx0: (a.clientX + b.clientX) / 2 - ir.left,
         cy0: (a.clientY + b.clientY) / 2 - ir.top,
+        // 记下这轮手势开始时的选区，缩放时永远从它算，避免逐帧累积乘法把框越乘越大（框「消失」）
+        sel0: sel ? { ...sel } : null,
       };
       drag = null; // 双指一进来就结束单指拖框，别让框跟着乱跑
       e.preventDefault();
@@ -667,9 +668,14 @@ export function cropDialog(file, opts = {}) {
       const w = clamp(pinch.w0 * (d / pinch.d0), fitW, fitW * 4);
       const k = w / (pinch.w0 || 1);
       if (Math.abs(k - 1) < 0.001) return;
-      // 缩放选区：框住的还是图片上同一块地方
-      if (sel) {
-        sel = { x: sel.x * k, y: sel.y * k, w: sel.w * k, h: sel.h * k };
+      // 缩放选区：从手势开始时的 sel0 算，框住的还是图片上同一块地方（不累积乘法）
+      if (pinch.sel0) {
+        sel = {
+          x: pinch.sel0.x * k,
+          y: pinch.sel0.y * k,
+          w: pinch.sel0.w * k,
+          h: pinch.sel0.h * k,
+        };
       }
       img.style.maxWidth = 'none';
       img.style.maxHeight = 'none';
