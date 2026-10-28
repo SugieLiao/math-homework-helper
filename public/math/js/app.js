@@ -1,5 +1,5 @@
 import { api, setUnauthorizedHandler, setPasscode, getPasscode, getUserId, setUserId } from './api.js';
-import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, promptDialog, openImage, makeThumb } from './util.js';
+import { esc, nl2br, toast, busy, idle, fmtDate, cropBand, cropDialog, compressImage, isHeicFile, withTimeout, confirmDialog, choiceDialog, promptDialog, openImage } from './util.js';
 import { renderQuestion, renderPrint } from './question.js';
 import { renderSettings } from './settings.js';
 import { renderTextbook } from './textbook.js';
@@ -215,7 +215,6 @@ function listSkeleton(text = '正在加载…', rows = 4) {
         .map(
           () => `
         <div class="sk-row">
-          <div class="sk-thumb"></div>
           <div class="sk-body">
             <div class="sk-line" style="width:56%"></div>
             <div class="sk-line sm" style="width:38%"></div>
@@ -431,11 +430,6 @@ async function home(opts = {}) {
   const rowHtml = (s, showPlace = false) => {
     const isPaper = !!s.paper_id;
     const href = isPaper ? `#/paper/${s.paper_id}` : `#/s/${s.id}`;
-    // 缩略图优先用 thumb/*（320px 小图），旧数据还没回填时退回用原图
-    const thumbKey = s.thumb_key || s.image_key;
-    const thumb = thumbKey
-      ? `<img class="sub-thumb zoomable" src="${api.imgUrl(thumbKey)}" alt="作业原图" />`
-      : `<div class="sub-thumb sub-thumb-ph">📄</div>`;
     const title = isPaper ? `📝 ${esc(s.paper_title || '练习卷')}` : fmtDate(s.created_at);
     const pageTag = Number(s.pages) > 1 ? ` · ${s.pages} 页` : '';
     const meta =
@@ -449,7 +443,6 @@ async function home(opts = {}) {
     <div class="sub-item" style="border-bottom:1px solid var(--line)">
       <input type="checkbox" class="sub-check" data-id="${s.id}" style="width:20px;height:20px;flex:0 0 auto" />
       <a href="${href}" style="display:flex;flex:1;min-width:0;text-decoration:none;color:inherit">
-        ${thumb}
         <div style="flex:1;min-width:0">
           <div style="font-weight:600">${title}${isPaper ? ' <span class="tag">组卷</span>' : ''}</div>
           <div class="small muted">${meta}</div>
@@ -1246,8 +1239,6 @@ filePageReplace.addEventListener('change', async () => {
     busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
     const small = await compressImage(picked);
     const extra = {};
-    const thumb = await makeThumb(picked);
-    if (thumb) extra.thumb = thumb;
     await api.upload(`/submissions/${info.subId}/pages/${info.pageId}`, small, extra, 'PUT');
     if (keep) {
       idle();
@@ -1290,8 +1281,6 @@ async function uploadPagesToSubmission(subId, files) {
       );
       const small = await compressImage(list0[i]);
       const extra = {};
-      const thumb = await makeThumb(list0[i]);
-      if (thumb) extra.thumb = thumb;
       const up = await api.upload(`/submissions/${subId}/pages`, small, extra);
       uploaded.push({ pageId: up.page.id, pos: up.page.pos, blob: small });
     } catch (e) {
@@ -2712,9 +2701,6 @@ async function uploadHomeworkFiles(files) {
       // 归类选的是弹窗里那一课，不是首页筛选；第二页起带 submission_id 追加到同一份作业
       const extra = { lesson_id: pendingLessonId || '' };
       if (subId) extra.submission_id = subId;
-      // 首页列表缩略图：顺带生成一张 320px 小图，失败也不拦主流程
-      const thumb = await makeThumb(list0[i]);
-      if (thumb) extra.thumb = thumb;
       const up = await api.upload('/homework/upload', small, extra);
       subId = up.id;
     }
@@ -2749,8 +2735,6 @@ async function uploadPaperFiles(files) {
       const small = await compressImage(list0[i]);
       const extra = {};
       if (subId) extra.submission_id = subId;
-      const thumb = await makeThumb(list0[i]);
-      if (thumb) extra.thumb = thumb;
       const up = await api.upload(`/papers/${pid}/answer`, small, extra);
       subId = up.id;
     }
