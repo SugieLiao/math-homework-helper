@@ -79,6 +79,7 @@ function qCard(q, withCheck = false, canRecrop = false) {
       ${recropBtn}
       <button class="btn sm" data-act="edit" data-id="${q.id}">改判</button>
       <button class="btn sm primary" data-act="open" data-id="${q.id}">举一反三</button>
+      <button class="btn sm danger" data-act="delq" data-id="${q.id}">删除</button>
     </div>
   </div>`;
 }
@@ -681,7 +682,7 @@ async function submission(id) {
         <span class="spacer"></span>
         <button class="btn primary" id="btn-sp-paper">＋ 加入组卷</button>
       </div>
-      <div class="hint">勾选题目后可以：整体判对 / 判错（只改对错，不用补错因和正确答案），或放进待组卷去出卷。进来时已经帮你把做错的都选上了。</div>
+      <div class="hint">勾选题目后可以：整体判对 / 判错（只改对错，不用补错因和正确答案），或放进待组卷去出卷。默认都不勾，要选哪些你自己勾。</div>
     </div>`
         : ''
     }
@@ -846,7 +847,7 @@ async function submission(id) {
     };
     pboxes().forEach((b) => {
       b.onchange = refreshSel;
-      b.checked = b.dataset.wrong === '1'; // 默认选上做错的
+      // 默认不勾选：要选哪些题（加入组卷 / 批量改判）由用户自己勾
     });
     refreshSel();
     document.getElementById('btn-sp-wrong').onclick = () => setSel(true, 'wrong');
@@ -935,7 +936,7 @@ async function submission(id) {
     };
   });
 
-  bindCards();
+  bindCards(() => submission(id));
 }
 
 /* ------------------------------------------------ 作业图片编辑 */
@@ -2201,7 +2202,7 @@ export function editDialog(q) {
   document.body.appendChild(wrap);
 }
 
-function bindCards() {
+function bindCards(onDelete) {
   document.querySelectorAll('[data-act=open]').forEach((b) => {
     b.onclick = () => (location.hash = `#/q/${b.dataset.id}`);
   });
@@ -2209,6 +2210,26 @@ function bindCards() {
     b.onclick = async () => {
       const d = await api.get(`/questions/${b.dataset.id}`);
       editDialog(d.question);
+    };
+  });
+  // 删除单题（比如模型重复识别出来的题）：确认后调后端删掉，再重绘详情页
+  document.querySelectorAll('[data-act=delq]').forEach((b) => {
+    b.onclick = async () => {
+      const ok = await confirmDialog('这道题和它下面的举一反三记录、作答截图会一起删掉，删了无法恢复。', {
+        title: '删除这道题？',
+        okText: '删除',
+      });
+      if (!ok) return;
+      busy('删除中…');
+      try {
+        await api.del(`/questions/${b.dataset.id}`);
+        idle();
+        toast('已删除这道题');
+        if (typeof onDelete === 'function') await onDelete();
+      } catch (e) {
+        idle();
+        toast(e.message, 8000);
+      }
     };
   });
 }
