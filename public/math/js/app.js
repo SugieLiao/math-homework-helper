@@ -2339,6 +2339,7 @@ async function renderPaper(id) {
         ${it.knowledge ? `<span class="badge gray">${esc(it.knowledge)}</span>` : ''}
         <span class="spacer"></span>
         <span class="small muted">来自第 ${esc(it.source_no || '')} 题</span>
+        <button class="btn sm" data-act="edit-item" data-id="${it.id}">✏ 编辑</button>
         <button class="btn sm" data-act="swap-item" data-id="${it.id}">🔄 换一题</button>
       </div>
       <div class="stem" style="margin:4px 0">${nl2br(it.stem)}</div>
@@ -2538,10 +2539,56 @@ async function renderPaper(id) {
     view.querySelectorAll('[data-act=swap-item]').forEach((b) => {
       b.onclick = () => swapItemDialog(id, b.dataset.id, reload);
     });
+    view.querySelectorAll('[data-act=edit-item]').forEach((b) => {
+      b.onclick = () => {
+        const it = items.find((x) => x.id === b.dataset.id);
+        if (it) editPaperItemDialog(id, it, reload);
+      };
+    });
   }
 
   bindDrag();
   bindSwapItem();
+}
+
+/* 编辑卷子里某道题（题干 / 答案 / 讲解 / 难度 / 知识点） */
+function editPaperItemDialog(pid, it, reload) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal';
+  wrap.innerHTML = `
+    <div class="modal-card">
+      <h3>编辑这道题</h3>
+      <div class="field"><label>题干</label><textarea id="epi-stem">${esc(it.stem)}</textarea></div>
+      <div class="field"><label>答案</label><input type="text" id="epi-answer" value="${esc(it.answer)}" /></div>
+      <div class="field"><label>讲解</label><textarea id="epi-solution">${esc(it.solution)}</textarea></div>
+      <div class="field"><label>难度</label><input type="text" id="epi-difficulty" value="${esc(it.difficulty || '同等')}" /></div>
+      <div class="field"><label>知识点</label><input type="text" id="epi-knowledge" value="${esc(it.knowledge)}" /></div>
+      <div class="row-end">
+        <button class="btn" data-act="cancel">取消</button>
+        <button class="btn primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  wrap.querySelector('[data-act=cancel]').onclick = () => wrap.remove();
+  wrap.querySelector('[data-act=save]').onclick = async () => {
+    busy('保存中…');
+    try {
+      await api.patch(`/papers/${pid}/items/${it.id}`, {
+        stem: wrap.querySelector('#epi-stem').value,
+        answer: wrap.querySelector('#epi-answer').value,
+        solution: wrap.querySelector('#epi-solution').value,
+        difficulty: wrap.querySelector('#epi-difficulty').value,
+        knowledge: wrap.querySelector('#epi-knowledge').value,
+      });
+      toast('已保存');
+      wrap.remove();
+      if (reload) await reload();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      idle();
+    }
+  };
+  document.body.appendChild(wrap);
 }
 
 /* 「换一题」弹窗：生成 3 道同类新题，用户点一道替换本题；「换一批」重新生成 3 道 */

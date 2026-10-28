@@ -2317,6 +2317,37 @@ async function handleApi(
     return json({ alternatives });
   }
 
+  // 编辑卷子里某道题（组卷时改题干/答案/讲解/难度/知识点，未传的字段保留原值）
+  const editItemMatch = /^\/papers\/([a-z0-9]+)\/items\/([a-z0-9]+)$/.exec(p);
+  if (editItemMatch && method === 'PATCH') {
+    const pid = editItemMatch[1];
+    const itemId = editItemMatch[2];
+    await ownPaper(env, pid, uid);
+    const item = await env.DB.prepare('SELECT * FROM paper_items WHERE id = ? AND paper_id = ? AND user_id = ?')
+      .bind(itemId, pid, uid)
+      .first<any>();
+    if (!item) throw new HttpError(404, '这道题不存在');
+    const body = await req.json<any>().catch(() => ({}));
+    const stem = body.stem !== undefined ? String(body.stem) : item.stem;
+    if (!String(stem).trim()) throw new HttpError(400, '题干不能为空');
+    await env.DB.prepare(
+      `UPDATE paper_items SET stem = ?, answer = ?, solution = ?, difficulty = ?, knowledge = ?
+       WHERE id = ? AND paper_id = ? AND user_id = ?`,
+    )
+      .bind(
+        String(stem),
+        body.answer !== undefined ? String(body.answer) : item.answer,
+        body.solution !== undefined ? String(body.solution) : item.solution,
+        body.difficulty !== undefined ? String(body.difficulty) : item.difficulty,
+        body.knowledge !== undefined ? String(body.knowledge) : item.knowledge,
+        itemId,
+        pid,
+        uid,
+      )
+      .run();
+    return json({ ok: true });
+  }
+
   // 用选中的新题替换卷子里某道题
   const swapReplaceMatch = /^\/papers\/([a-z0-9]+)\/items\/([a-z0-9]+)\/replace$/.exec(p);
   if (swapReplaceMatch && method === 'POST') {
@@ -2940,12 +2971,30 @@ async function handleApi(
     return json({ ok: true });
   }
 
-  // 手动改判变式题
+  // 变式题：改判（status/student_answer/comment）或编辑题目本身（stem/answer/solution/difficulty）
   const vMatch = /^\/variants\/([a-z0-9]+)$/.exec(p);
   if (vMatch && method === 'PATCH') {
     const body = await req.json<any>();
     const v = await env.DB.prepare('SELECT * FROM variants WHERE id = ? AND user_id = ?').bind(vMatch[1], uid).first<any>();
     if (!v) throw new HttpError(404, '题目不存在');
+    // 编辑题目字段：传了就覆盖（允许清空成空串，所以不用 COALESCE）
+    const editing =
+      body.stem !== undefined || body.answer !== undefined || body.solution !== undefined || body.difficulty !== undefined;
+    if (editing) {
+      await env.DB.prepare(
+        `UPDATE variants SET stem = ?, answer = ?, solution = ?, difficulty = ? WHERE id = ? AND user_id = ?`,
+      )
+        .bind(
+          body.stem !== undefined ? String(body.stem) : v.stem,
+          body.answer !== undefined ? String(body.answer) : v.answer,
+          body.solution !== undefined ? String(body.solution) : v.solution,
+          body.difficulty !== undefined ? String(body.difficulty) : v.difficulty,
+          vMatch[1],
+          uid,
+        )
+        .run();
+    }
+    // 改判：状态 + 学生作答 + 备注
     const status = body.status ?? v.status;
     await env.DB.prepare(
       `UPDATE variants SET status = ?, student_answer = COALESCE(?, student_answer),

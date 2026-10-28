@@ -26,6 +26,7 @@ function variantRow(v, parent) {
       ${v.student_answer ? `<div class="small">作答：<b>${esc(v.student_answer)}</b></div>` : ''}
       ${v.comment ? `<div class="small muted">${esc(v.comment)}</div>` : ''}
       <div class="row wrap" style="margin-top:6px">
+        <button class="btn sm" data-act="edit-variant" data-id="${v.id}">✏ 编辑</button>
         <button class="btn sm" data-act="toggle-ans" data-id="${v.id}">看答案</button>
         <button class="btn sm ok" data-act="mark" data-id="${v.id}" data-st="correct">标为做对</button>
         <button class="btn sm danger" data-act="mark" data-id="${v.id}" data-st="wrong">标为做错</button>
@@ -37,6 +38,47 @@ function variantRow(v, parent) {
       </div>
     </div>
   </div>`;
+}
+
+/**
+ * 编辑一道举一反三的变式题（题干 / 答案 / 讲解 / 难度）。
+ * 保存后提示可以加入组卷，用户可以勾选它再点「＋ 加入组卷」。
+ */
+function editVariantDialog(v, rerender) {
+  const wrap = document.createElement('div');
+  wrap.className = 'modal';
+  wrap.innerHTML = `
+    <div class="modal-card">
+      <h3>编辑变式 ${esc(v.seq)}</h3>
+      <div class="field"><label>题干</label><textarea id="ev-stem">${esc(v.stem)}</textarea></div>
+      <div class="field"><label>答案</label><input type="text" id="ev-answer" value="${esc(v.answer)}" /></div>
+      <div class="field"><label>讲解</label><textarea id="ev-solution">${esc(v.solution)}</textarea></div>
+      <div class="field"><label>难度</label><input type="text" id="ev-difficulty" value="${esc(v.difficulty || '同等')}" /></div>
+      <div class="row-end">
+        <button class="btn" data-act="cancel">取消</button>
+        <button class="btn primary" data-act="save">保存</button>
+      </div>
+    </div>`;
+  wrap.querySelector('[data-act=cancel]').onclick = () => wrap.remove();
+  wrap.querySelector('[data-act=save]').onclick = async () => {
+    busy('保存中…');
+    try {
+      await api.patch(`/variants/${v.id}`, {
+        stem: wrap.querySelector('#ev-stem').value,
+        answer: wrap.querySelector('#ev-answer').value,
+        solution: wrap.querySelector('#ev-solution').value,
+        difficulty: wrap.querySelector('#ev-difficulty').value,
+      });
+      toast('已保存，勾选后点「＋ 加入组卷」即可出卷');
+      wrap.remove();
+      if (rerender) await rerender();
+    } catch (e) {
+      toast(e.message);
+    } finally {
+      idle();
+    }
+  };
+  document.body.appendChild(wrap);
 }
 
 export async function renderQuestion(id) {
@@ -130,6 +172,13 @@ function bindVariantActions(q) {
       } catch (e) {
         toast(e.message);
       }
+    };
+  });
+  document.querySelectorAll('[data-act=edit-variant]').forEach((b) => {
+    b.onclick = async () => {
+      const v = (q.variants || []).find((x) => x.id === b.dataset.id);
+      if (!v) return;
+      await editVariantDialog(v, () => renderQuestion(q.id));
     };
   });
   document.querySelectorAll('[data-act=sel]').forEach((cb) => {
