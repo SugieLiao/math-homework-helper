@@ -143,8 +143,15 @@ document.getElementById('up-tb').onchange = async (e) => {
   localStorage.setItem(TB_KEY, e.target.value);
   await fillUploadLessons(e.target.value, '');
 };
-document.getElementById('up-go').onclick = () => {
-  pendingLessonId = document.getElementById('up-lesson').value || '';
+document.getElementById('up-go').onclick = async () => {
+  let lessonId = document.getElementById('up-lesson').value || '';
+  // 没选课文：弹确认框，让用户当场选一课，或明确选择「先不选，批改后再归类」
+  if (!lessonId) {
+    const pick = await lessonConfirmDialog(document.getElementById('up-lesson').innerHTML);
+    if (pick === null) return; // 取消，留在交作业弹窗
+    lessonId = pick === 'skip' ? '' : pick;
+  }
+  pendingLessonId = lessonId;
   trayFiles = []; // 每次新交作业都从第一页开始
   closeShotsTray();
   const kind = pendingKind;
@@ -153,6 +160,50 @@ document.getElementById('up-go').onclick = () => {
   const inputId = kind === 'album' ? 'file-homework-album' : 'file-homework';
   document.getElementById(inputId).click();
 };
+
+/**
+ * 「还没选课文」确认弹窗：当场选一课，或明确选「先不选，批改后再归类」继续。
+ * 返回：null（取消）| 'skip'（先不选）| lessonId（选了某课）。
+ * optionsHtml 复用交作业弹窗里已加载好的课文下拉内容。
+ */
+function lessonConfirmDialog(optionsHtml) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'modal';
+    wrap.innerHTML = `
+      <div class="modal-card confirm-card" role="dialog" aria-modal="true">
+        <h3>还没选择课文</h3>
+        <div class="confirm-msg">这份作业属于哪一课？选了以后按单元复习一筛就出来，没选也能批改完再归类。</div>
+        <select data-act="lesson" style="width:100%">${optionsHtml}</select>
+        <div class="row-end" style="margin-top:12px">
+          <button class="btn" data-act="cancel">取消</button>
+          <button class="btn primary" data-act="go">继续提交</button>
+        </div>
+      </div>`;
+    document.body.appendChild(wrap);
+    let closed = false;
+    const done = (v) => {
+      if (closed) return;
+      closed = true;
+      document.removeEventListener('keydown', onKey);
+      wrap.remove();
+      resolve(v);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') done(null);
+    };
+    const sel = wrap.querySelector('[data-act=lesson]');
+    wrap.querySelector('[data-act=cancel]').onclick = () => done(null);
+    wrap.querySelector('[data-act=go]').onclick = () => done(sel.value || 'skip');
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(null);
+    });
+    document.addEventListener('keydown', onKey);
+    // 默认聚焦「继续提交」；选课下拉里「先不选」就是第一项
+    const go = wrap.querySelector('[data-act=go]');
+    if (go) setTimeout(() => go.focus(), 0);
+  });
+}
 
 /* 列表骨架屏：数据没回来时先占位。
    之前列表区是纯空白，用户分不清「正在加载」还是「这份作业列表本来就空了」。 */
@@ -660,7 +711,6 @@ async function submission(id) {
             )
             .join('')}
         </select>
-        <button class="btn sm" id="btn-save-lesson">保存归类</button>
         <span class="spacer"></span>
         <button class="btn danger sm" id="btn-del-sub">删除这份作业</button>
       </div>
@@ -744,17 +794,17 @@ async function submission(id) {
     };
   }
   applyWrongFilter();
-  const lessonBtn = document.getElementById('btn-save-lesson');
-  if (lessonBtn) {
-    lessonBtn.onclick = async () => {
-      busy('保存中…');
+  // 选了课文立即自动保存，不用再点「保存归类」
+  const lessonSel = document.getElementById('s-lesson');
+  if (lessonSel) {
+    lessonSel.onchange = async () => {
       try {
-        await api.patch(`/submissions/${id}`, { lesson_id: document.getElementById('s-lesson').value });
-        idle();
+        await api.patch(`/submissions/${id}`, { lesson_id: lessonSel.value });
+        s.lesson_id = lessonSel.value || null; // 同步内存里的值，让「上一课/下一课」导航跟着变
+        paintLessonNav(s, units);
         toast('已归类');
       } catch (e) {
-        idle();
-        toast(e.message);
+        toast(e.message, 6000);
       }
     };
   }
