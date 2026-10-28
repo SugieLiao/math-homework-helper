@@ -216,9 +216,9 @@ img.zoomable { cursor: zoom-in; }
   .p-item { page-break-inside: avoid; }
 }
 .print-head { display: none; }
-.p-item { margin-bottom: 22px; }
+.p-item { margin-bottom: 40px; }
 .p-stem { font-size: 17px; margin: 6px 0 10px; }
-.p-blank { height: 110px; border: 1px solid #333; border-radius: 6px; background: repeating-linear-gradient(#fff, #fff 27px, #dfe6f2 28px); }
+.p-blank { height: 110px; background: repeating-linear-gradient(#fff, #fff 27px, #dfe6f2 28px); }
 .p-blank.tall { height: 150px; }
 .p-blank-3 { height: 110px; }
 .p-blank-5 { height: 176px; }
