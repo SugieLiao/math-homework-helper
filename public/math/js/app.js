@@ -937,6 +937,33 @@ async function submission(id) {
   });
 
   bindCards(() => submission(id));
+
+  // 还在批改中：启动轮询，后台批改一完成就自动刷新，不用手动刷
+  if (s.status === 'grading') autoRefreshGrading(id, epoch);
+}
+
+/**
+ * 详情页停留在「批改中」时持续轮询，后台批改一完成（graded/error）就自动重绘。
+ * 离开这个页面（路由变了）就停止，避免后台空转。
+ */
+async function autoRefreshGrading(subId, epoch) {
+  for (let i = 0; i < 120; i++) {
+    // 最多轮询 5 分钟（2.5s × 120），超时就停，用户手动刷
+    await new Promise((r) => setTimeout(r, 2500));
+    if (stalePage(epoch)) return; // 已经离开这个页面
+    let s;
+    try {
+      const d = await api.get(`/submissions/${subId}`);
+      s = d.submission;
+    } catch (e) {
+      return; // 拉不到就停，别一直报错
+    }
+    if (s && s.status !== 'grading') {
+      // 批改出了结果（成功或失败），自动刷新页面
+      if (!stalePage(epoch)) await submission(subId);
+      return;
+    }
+  }
 }
 
 /* ------------------------------------------------ 作业图片编辑 */
