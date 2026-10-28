@@ -20,6 +20,7 @@ export interface Env {
   DB: D1Database;
   IMAGES: R2Bucket;
   ASSETS: Fetcher;
+  GRADE_QUEUE: Queue;
 }
 
 const DEFAULT_BASE = 'https://ark.cn-beijing.volces.com/api/v3';
@@ -691,6 +692,38 @@ export default {
       return json({ error: msg }, status);
     }
   },
+
+  // 批改队列 consumer：后台调模型批改，成功写 graded、失败写 error。
+  // 这里不受 HTTP 请求墙钟限制（consumer 单次可跑 15 分钟），模型再慢也不会被杀死。
+  async queue(batch: MessageBatch, env: Env, ctx: ExecutionContext): Promise<void> {
+    for (const m of batch.messages) {
+      const body = m.body as { type?: string; submissionId?: string; pageId?: string; uid?: string };
+      const type = body?.type;
+      const subId = String(body?.submissionId || '');
+      const uid = String(body?.uid || '');
+      const pageId = body?.pageId;
+      if (!subId || !uid || (type !== 'homework' && type !== 'page')) {
+        m.ack(); // 消息格式不对，直接确认丢弃（避免死循环重试）
+        continue;
+      }
+      try {
+        if (type === 'homework') {
+          await gradeHomework(env, subId, uid);
+        } else {
+          await gradePage(env, subId, String(pageId || ''), uid);
+        }
+        m.ack();
+      } catch (e: any) {
+        // 批改失败：把状态标成 error，让前端轮询时能看到「批改失败」而不是永远「批改中」
+        const msg = String(e?.message || e).slice(0, 500);
+        await env.DB.prepare("UPDATE submissions SET status = 'error', error_msg = ? WHERE id = ? AND user_id = ?")
+          .bind(msg, subId, uid)
+          .run()
+          .catch(() => {});
+        m.ack(); // 已落 error 状态，确认掉（不再重试，重试也大概率同样失败）
+      }
+    }
+  },
 };
 
 /* ------------------------------------------------- 教材大纲辅助函数 */
@@ -861,6 +894,11 @@ async function deleteUserData(env: Env, uid: string): Promise<void> {
   await env.DB.prepare('DELETE FROM llm_profiles WHERE user_id = ?').bind(uid).run();
   await env.DB.prepare('DELETE FROM user_settings WHERE user_id = ?').bind(uid).run();
   await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(uid).run();
+}
+
+/** 批改任务入队：轻量消息（只放 id 和类型），批改时再读 R2 图 + DB 设置 */
+async function enqueueGrade(env: Env, msg: { type: 'homework' | 'page'; submissionId: string; pageId?: string; uid: string }): Promise<void> {
+  await env.GRADE_QUEUE.send(msg);
 }
 
 /** 批改一份作业：读图 → 让模型逐题识别/判对错/写错因 → 落库。失败由调用方统一标 error。 */
@@ -1629,20 +1667,20 @@ async function handleApi(
     return json({ id, image_key: key, pos: 0 });
   }
 
-  // 批改（OCR + 判对错 + 分析）
+  // 批改（OCR + 判对错 + 分析）。改成后台任务：入队后立即返回，队列 consumer 后台调模型，
+  // 前端轮询状态直到 graded/error。这样模型慢也不会撞 Worker 墙钟上限被杀死、卡在 grading。
   if (p.startsWith('/homework/') && p.endsWith('/grade') && method === 'POST') {
     const id = p.slice('/homework/'.length, -'/grade'.length);
-    // 失败时把状态标成 error（否则界面上会永远停在「老师正在批改…」）
-    try {
-      return await gradeHomework(env, id, uid);
-    } catch (e: any) {
-      const msg = String(e?.message || e).slice(0, 500);
-      await env.DB.prepare("UPDATE submissions SET status = 'error', error_msg = ? WHERE id = ? AND user_id = ?")
-        .bind(msg, id, uid)
-        .run()
-        .catch(() => {});
-      throw e;
-    }
+    // 入队前做轻量校验：作业和图片都得在，别把必败的任务丢进队列白等一轮
+    const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?').bind(id, uid).first<any>();
+    if (!sub) throw new HttpError(404, '提交不存在');
+    const pgs = await env.DB.prepare('SELECT image_key FROM submission_pages WHERE submission_id = ? AND image_key IS NOT NULL')
+      .bind(id)
+      .all<any>();
+    const hasImg = (pgs.results || []).length > 0;
+    if (!hasImg) throw new HttpError(404, '图片不存在（可能没上传成功），请重新拍照上传。');
+    await enqueueGrade(env, { type: 'homework', submissionId: id, uid });
+    return json({ queued: true, submission_id: id });
   }
 
   // 上传某题答案裁剪图
@@ -2612,9 +2650,14 @@ async function handleApi(
     return json({ ok: true, deleted_questions: keep ? 0 : qids.length, kept_questions: keep ? qids.length : 0 });
   }
 
-  // 只重批某一页
+  // 只重批某一页（同样改成后台队列，避免同步等模型超时）
   if (subPageGradeMatch && method === 'POST') {
-    return gradePage(env, subPageGradeMatch[1], subPageGradeMatch[2], uid);
+    const subId = subPageGradeMatch[1];
+    const pageId = subPageGradeMatch[2];
+    const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ?').bind(subId, uid).first<any>();
+    if (!sub) throw new HttpError(404, '提交不存在');
+    await enqueueGrade(env, { type: 'page', submissionId: subId, pageId, uid });
+    return json({ queued: true, submission_id: subId, page_id: pageId });
   }
 
   const subMatch = /^\/submissions\/([a-z0-9]+)$/.exec(p);

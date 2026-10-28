@@ -32,5 +32,18 @@ database_id = "b9aa60f6-04e0-4c58-a357-5db289214ed7"
 binding = "IMAGES"
 bucket_name = "math-helper-images"
 
+# 批改任务队列：上传后立即入队返回，后台 consumer 调大模型批改，
+# 避免「请求内同步等模型」撞上 Worker 墙钟上限被杀死、状态卡在 grading。
+[[queues.producers]]
+binding = "GRADE_QUEUE"
+queue = "grade-queue"
+
+[[queues.consumers]]
+queue = "grade-queue"
+# 模型调用最长 150s，consumer 单次执行上限 15 分钟，足够；失败重试 3 次
+max_batch_size = 1
+max_retries = 3
+dead_letter_queue = "grade-queue-dlq"
+
 [observability]
 enabled = false

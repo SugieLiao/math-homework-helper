@@ -782,8 +782,11 @@ async function submission(id) {
     reBtn.onclick = async () => {
       try {
         busy('老师正在批改…（快速模式约 15～40 秒）');
-        const graded = await withTimeout(api.post(`/homework/${id}/grade`, {}), 180000);
-        await attachAnswerImages(id, graded.questions || []);
+        // 批改已改成后台任务：入队后轮询状态
+        await api.post(`/homework/${id}/grade`, {});
+        const res = await pollGrade(id);
+        if (!res.ok) throw new Error(res.error);
+        await attachAnswerImages(id, res.questions || []);
         idle();
         toast('批改完成');
         await submission(id);
@@ -1011,10 +1014,35 @@ export function cropRectOf(q) {
 /** 只批改一页，并把每题的作答区域从这一页的图上裁出来 */
 async function gradeOnePage(subId, pageId, blob, label) {
   busy(`${label} 老师正在批改…（约 15～40 秒，别关页面）`);
-  const graded = await withTimeout(api.post(`/submissions/${subId}/pages/${pageId}/grade`, {}), 180000);
-  const list = graded.questions || [];
+  // 批改已改成后台任务：这里入队后轮询，直到状态不再是「批改中」
+  await api.post(`/submissions/${subId}/pages/${pageId}/grade`, {});
+  const res = await pollGrade(subId);
+  if (!res.ok) throw new Error(res.error);
+  const list = res.questions || [];
   await attachAnswerImages(subId, list, [blob].filter(Boolean));
   return list;
+}
+
+/**
+ * 轮询一份作业的批改状态，直到不再是 grading。
+ * 批改在后台队列里跑（模型慢也不会超时），这里每 2 秒查一次，最多等 4 分钟。
+ * 返回 { ok, questions, pages } 或 { ok:false, error }。
+ */
+async function pollGrade(subId, timeoutMs = 240000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const d = await api.get(`/submissions/${subId}`);
+    const s = d.submission;
+    if (!s) return { ok: false, error: '这份作业找不到了' };
+    if (s.status === 'graded') {
+      return { ok: true, questions: d.questions || [], pages: d.pages || [] };
+    }
+    if (s.status === 'error') {
+      return { ok: false, error: s.error_msg || '批改失败，可以点「重新批改」再试' };
+    }
+  }
+  return { ok: false, error: '批改超时了，稍后在作业列表刷新看看结果' };
 }
 
 /** answer_band 在库里是 JSON 字符串、批改接口里是数组，两种都要吃 */
@@ -2490,10 +2518,12 @@ async function uploadHomeworkFiles(files) {
         ? `老师正在批改 ${list0.length} 页…（大约 30～70 秒，别关页面）`
         : '老师正在批改…（快速模式约 15～40 秒，别关页面）',
     );
-    // 批改是长请求，加硬超时，避免界面无限转圈
-    const graded = await withTimeout(api.post(`/homework/${subId}/grade`, {}), 240000);
+    // 批改已改成后台任务：入队后轮询状态，模型慢也不会超时
+    await api.post(`/homework/${subId}/grade`, {});
+    const res = await pollGrade(subId);
+    if (!res.ok) throw new Error(res.error);
     // 裁剪每题的作答图（用转码后的 JPEG 裁，HEIC 浏览器解不开）；多页要按题目所在页裁
-    const list = graded.questions || [];
+    const list = res.questions || [];
     await attachAnswerImages(subId, list, blobs);
     idle();
     toast(`批改完成，共 ${list.length} 题${list0.length > 1 ? `（${list0.length} 页）` : ''}`);
@@ -2758,8 +2788,11 @@ async function handlePaperFile(input) {
     const up = await api.upload(`/papers/${pid}/answer`, small, extra);
     subId = up.id;
     busy('老师正在批改…（快速模式约 15～40 秒，别关页面）');
-    const graded = await withTimeout(api.post(`/homework/${up.id}/grade`, {}), 180000);
-    await attachAnswerImages(up.id, graded.questions || [], [small]);
+    // 批改已改成后台任务：入队后轮询状态
+    await api.post(`/homework/${up.id}/grade`, {});
+    const res = await pollGrade(up.id);
+    if (!res.ok) throw new Error(res.error);
+    await attachAnswerImages(up.id, res.questions || [], [small]);
     idle();
     toast('批改完成');
     location.hash = `#/s/${up.id}`;
