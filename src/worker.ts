@@ -2262,7 +2262,7 @@ async function handleApi(
     return json({ ok: true });
   }
 
-  // 给卷子里某道题生成「换题」候选：按原题出 3 道同类新题（不落库，用户选定了才替换）
+  // 给卷子里某道题生成「换题」候选：按**原始错题**出 3 道同类新题（不落库，用户选定了才替换）
   const swapAltMatch = /^\/papers\/([a-z0-9]+)\/items\/([a-z0-9]+)\/alternatives$/.exec(p);
   if (swapAltMatch && method === 'POST') {
     const pid = swapAltMatch[1];
@@ -2272,12 +2272,31 @@ async function handleApi(
       .bind(itemId, pid, uid)
       .first<any>();
     if (!item) throw new HttpError(404, '这道题不存在');
+    // 换题的模板是「原始错题」（source_question_id），不是卷子里当前这道新题：
+    // 否则一代代基于新题再出新题，会离原始错题越来越远。找不到原始错题才退回用当前题。
+    let srcStem = String(item.stem || '');
+    let srcAnswer = String(item.answer || '');
+    let srcKnowledge = String(item.knowledge || '');
+    let srcIsWrong = false;
+    let srcErrorReason = '';
+    if (item.source_question_id) {
+      const srcQ = await env.DB.prepare('SELECT * FROM questions WHERE id = ? AND user_id = ?')
+        .bind(String(item.source_question_id), uid)
+        .first<any>();
+      if (srcQ) {
+        srcStem = String(srcQ.stem || '');
+        srcAnswer = String(srcQ.correct_answer || '');
+        srcKnowledge = String(srcQ.knowledge || '');
+        srcIsWrong = Number(srcQ.is_correct) === 0;
+        srcErrorReason = String(srcQ.error_reason || '');
+      }
+    }
     const s = await getSettings(env, uid);
     const text = await llm(
       env,
       uid,
       variantsSystemPrompt(s.grade),
-      variantsUserPrompt(String(item.stem || ''), String(item.answer || ''), String(item.knowledge || ''), false, '', 3),
+      variantsUserPrompt(srcStem, srcAnswer, srcKnowledge, srcIsWrong, srcErrorReason, 3),
       { temperature: 0.8, maxTokens: 3000, text: true, thinking: (s.thinking_mode as any) || 'fast' },
     );
     let parsed: any;
@@ -2293,7 +2312,7 @@ async function handleApi(
       answer: String(v.answer ?? ''),
       solution: String(v.solution ?? ''),
       difficulty: String(v.difficulty ?? '同等'),
-      knowledge: String(v.knowledge ?? item.knowledge ?? ''),
+      knowledge: String(v.knowledge ?? srcKnowledge ?? ''),
     }));
     return json({ alternatives });
   }
