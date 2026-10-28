@@ -2339,6 +2339,7 @@ async function renderPaper(id) {
         ${it.knowledge ? `<span class="badge gray">${esc(it.knowledge)}</span>` : ''}
         <span class="spacer"></span>
         <span class="small muted">来自第 ${esc(it.source_no || '')} 题</span>
+        <button class="btn sm" data-act="swap-item" data-id="${it.id}">🔄 换一题</button>
       </div>
       <div class="stem" style="margin:4px 0">${nl2br(it.stem)}</div>
       <div class="small muted">答案：${esc(it.answer)}</div>
@@ -2414,6 +2415,7 @@ async function renderPaper(id) {
     boxes().forEach((b) => (b.onchange = refreshSel));
     refreshSel();
     bindDrag();
+    bindSwapItem();
   };
 
   document.getElementById('pi-del').onclick = async () => {
@@ -2524,7 +2526,95 @@ async function renderPaper(id) {
       });
     });
   }
+
+  /* 「换一题」：给每道题绑上换题按钮，点了弹窗出 3 道新题候选 */
+  function bindSwapItem() {
+    view.querySelectorAll('[data-act=swap-item]').forEach((b) => {
+      b.onclick = () => swapItemDialog(id, b.dataset.id, reload);
+    });
+  }
+
   bindDrag();
+  bindSwapItem();
+}
+
+/* 「换一题」弹窗：生成 3 道同类新题，用户点一道替换本题；「换一批」重新生成 3 道 */
+async function swapItemDialog(pid, itemId, reload) {
+  const load = async () => {
+    busy('正在出候选新题…');
+    try {
+      const r = await api.post(`/papers/${pid}/items/${itemId}/alternatives`, {});
+      idle();
+      return r.alternatives || [];
+    } catch (e) {
+      idle();
+      toast(e.message, 8000);
+      return null;
+    }
+  };
+
+  let alts = await load();
+  if (!alts) return;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'modal';
+  const render = (list) => {
+    wrap.innerHTML = `
+      <div class="modal-card swap-card" role="dialog" aria-modal="true">
+        <h3>换一题</h3>
+        <div class="hint">选一道新题替换本题；都不满意就点「换一批」重新出。</div>
+        <div class="swap-list">
+          ${list
+            .map(
+              (a, i) => `
+            <div class="swap-opt" data-idx="${i}">
+              <div class="row wrap">
+                <span class="badge gray">${esc(a.difficulty || '同等')}</span>
+                ${a.knowledge ? `<span class="badge gray">${esc(a.knowledge)}</span>` : ''}
+              </div>
+              <div class="stem" style="margin:6px 0">${nl2br(a.stem)}</div>
+              <div class="small muted">答案：${esc(a.answer)}</div>
+              <div class="row-end" style="margin-top:8px"><button class="btn sm primary" data-act="pick" data-idx="${i}">用这道替换</button></div>
+            </div>`,
+            )
+            .join('')}
+        </div>
+        <div class="row-end" style="margin-top:12px">
+          <button class="btn" data-act="cancel">取消</button>
+          <button class="btn" data-act="refresh">🔄 换一批</button>
+        </div>
+      </div>`;
+    wrap.querySelectorAll('[data-act=pick]').forEach((b) => {
+      b.onclick = async () => {
+        const a = list[Number(b.dataset.idx)];
+        if (!a) return;
+        busy('替换中…');
+        try {
+          await api.post(`/papers/${pid}/items/${itemId}/replace`, a);
+          idle();
+          wrap.remove();
+          toast('已换题');
+          await reload();
+        } catch (e) {
+          idle();
+          toast(e.message, 8000);
+        }
+      };
+    });
+    wrap.querySelector('[data-act=cancel]').onclick = () => wrap.remove();
+    wrap.querySelector('[data-act=refresh]').onclick = async () => {
+      const next = await load();
+      if (next && next.length) {
+        alts = next;
+        render(next);
+      }
+    };
+  };
+  render(alts);
+  wrap.addEventListener('click', (e) => {
+    if (e.target === wrap) wrap.remove();
+  });
+  document.body.appendChild(wrap);
 }
 
 /* 打印试卷：每题留答题空白，答案不给（避免孩子直接抄） */

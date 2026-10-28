@@ -2262,6 +2262,74 @@ async function handleApi(
     return json({ ok: true });
   }
 
+  // 给卷子里某道题生成「换题」候选：按原题出 3 道同类新题（不落库，用户选定了才替换）
+  const swapAltMatch = /^\/papers\/([a-z0-9]+)\/items\/([a-z0-9]+)\/alternatives$/.exec(p);
+  if (swapAltMatch && method === 'POST') {
+    const pid = swapAltMatch[1];
+    const itemId = swapAltMatch[2];
+    await ownPaper(env, pid, uid);
+    const item = await env.DB.prepare('SELECT * FROM paper_items WHERE id = ? AND paper_id = ? AND user_id = ?')
+      .bind(itemId, pid, uid)
+      .first<any>();
+    if (!item) throw new HttpError(404, '这道题不存在');
+    const s = await getSettings(env, uid);
+    const text = await llm(
+      env,
+      uid,
+      variantsSystemPrompt(s.grade),
+      variantsUserPrompt(String(item.stem || ''), String(item.answer || ''), String(item.knowledge || ''), false, '', 3),
+      { temperature: 0.8, maxTokens: 3000, text: true, thinking: (s.thinking_mode as any) || 'fast' },
+    );
+    let parsed: any;
+    try {
+      parsed = extractJson(text);
+    } catch {
+      throw new HttpError(502, `没能生成出题目：${text.slice(0, 200)}`);
+    }
+    const list: any[] = Array.isArray(parsed?.variants) ? parsed.variants : [];
+    if (!list.length) throw new HttpError(502, '没有生成出新题，请再试一次。');
+    const alternatives = list.map((v: any) => ({
+      stem: String(v.stem ?? ''),
+      answer: String(v.answer ?? ''),
+      solution: String(v.solution ?? ''),
+      difficulty: String(v.difficulty ?? '同等'),
+      knowledge: String(v.knowledge ?? item.knowledge ?? ''),
+    }));
+    return json({ alternatives });
+  }
+
+  // 用选中的新题替换卷子里某道题
+  const swapReplaceMatch = /^\/papers\/([a-z0-9]+)\/items\/([a-z0-9]+)\/replace$/.exec(p);
+  if (swapReplaceMatch && method === 'POST') {
+    const pid = swapReplaceMatch[1];
+    const itemId = swapReplaceMatch[2];
+    await ownPaper(env, pid, uid);
+    const item = await env.DB.prepare('SELECT id FROM paper_items WHERE id = ? AND paper_id = ? AND user_id = ?')
+      .bind(itemId, pid, uid)
+      .first<any>();
+    if (!item) throw new HttpError(404, '这道题不存在');
+    const body = await req.json<any>().catch(() => ({}));
+    const stem = String(body.stem || '').trim();
+    const answer = String(body.answer || '').trim();
+    if (!stem) throw new HttpError(400, '新题没有题干');
+    await env.DB.prepare(
+      `UPDATE paper_items SET stem = ?, answer = ?, solution = ?, difficulty = ?, knowledge = ?
+       WHERE id = ? AND paper_id = ? AND user_id = ?`,
+    )
+      .bind(
+        stem,
+        answer,
+        String(body.solution || '').trim(),
+        String(body.difficulty || '同等').trim(),
+        String(body.knowledge || '').trim(),
+        itemId,
+        pid,
+        uid,
+      )
+      .run();
+    return json({ ok: true });
+  }
+
   // 确认组卷：卷子本质上也是一份作业，确认时要归到「教材（必选）→ 单元 → 课文（可选）」，
   // 并立刻生成一条作业记录（status=pending = 未作答），这样它马上出现在作业列表里。
   if (p.startsWith('/papers/') && p.endsWith('/finalize') && method === 'POST') {

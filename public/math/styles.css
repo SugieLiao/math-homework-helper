@@ -235,6 +235,12 @@ img.zoomable { cursor: zoom-in; }
 .drag-handle { cursor: grab; color: var(--ink-3); font-size: 15px; letter-spacing: -2px; user-select: none; padding: 0 2px; }
 .paper-item.hide-answer .stem + .small { display: none; }
 
+/* 换题弹窗 */
+.swap-card { max-width: 560px; max-height: 78vh; overflow: auto; }
+.swap-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.swap-opt { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: #fff; }
+.swap-opt:hover { border-color: var(--primary); }
+
 @media (max-width: 600px) {
   main { padding: 12px 10px 70px; }
   .stat-grid { grid-template-columns: repeat(3, 1fr); }
