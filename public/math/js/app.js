@@ -2498,10 +2498,16 @@ async function renderPaper(id) {
   const albumBtn = document.getElementById('pi-album');
   if (shootBtn) shootBtn.onclick = () => {
     pendingPaperId = id;
+    trayFiles = []; // 每次新交答卷都从第一页开始
+    pendingAddSubId = null;
+    closeShotsTray();
     document.getElementById('file-paper').click();
   };
   if (albumBtn) albumBtn.onclick = () => {
     pendingPaperId = id;
+    trayFiles = [];
+    pendingAddSubId = null;
+    closeShotsTray();
     document.getElementById('file-paper-album').click();
   };
 
@@ -2726,6 +2732,41 @@ async function uploadHomeworkFiles(files) {
   }
 }
 
+/**
+ * 组卷的答卷（多页）：把（一张或多张）照片当同一份答卷上传，第一张建/关联答卷，
+ * 后面几张追加成第 2、3… 页，全部到齐后只批改一次。和普通作业 uploadHomeworkFiles 同一套体验。
+ */
+async function uploadPaperFiles(files) {
+  const pid = pendingPaperId;
+  const list0 = Array.from(files || []).filter(Boolean);
+  if (!list0.length || !pid) return;
+  if (list0.length > 8) return toast('一次最多 8 页，多了分成两次交吧', 6000);
+  let subId = null;
+  try {
+    for (let i = 0; i < list0.length; i++) {
+      const prefix = list0.length > 1 ? `第 ${i + 1}/${list0.length} 页 · ` : '';
+      busy(isHeicFile(list0[i]) ? `${prefix}HEIC 照片正在转成 JPG…` : `${prefix}上传中…`);
+      const small = await compressImage(list0[i]);
+      const extra = {};
+      if (subId) extra.submission_id = subId;
+      const thumb = await makeThumb(list0[i]);
+      if (thumb) extra.thumb = thumb;
+      const up = await api.upload(`/papers/${pid}/answer`, small, extra);
+      subId = up.id;
+    }
+    // 批改是后台任务：入队后立即返回，跳去详情页由它自动轮询刷新
+    await api.post(`/homework/${subId}/grade`, {});
+    idle();
+    toast('已提交，正在后台批改…');
+    location.hash = `#/s/${subId}`;
+  } catch (e) {
+    idle();
+    toast(e.message, 8000);
+    if (subId) location.hash = `#/s/${subId}`;
+    else location.hash = `#/paper/${pid}`;
+  }
+}
+
 /* ------------------------------------------------ 待上传照片托盘 */
 // 手机系统一次往往只肯给一张（拍照必然如此，部分机型/内置浏览器的相册也只让单选）。
 // 所以先把照片攒进这个托盘：可以反复「再拍一张 / 再选几张」，攒够了再一次性上传、一次批改。
@@ -2814,6 +2855,13 @@ function trayCap() {
 
 /** 在用户手势里同步调起相机 / 相册（「↻ 重拍 / ↻ 重选」和托盘里的「＋」用） */
 function reopenPicker(kind) {
+  // 组卷的答卷：用组卷的 input；否则用普通作业的
+  if (pendingPaperId) {
+    const id = kind === 'album' ? 'file-paper-album' : 'file-paper';
+    const el = document.getElementById(id);
+    if (el) el.click();
+    return;
+  }
   const id = kind === 'album' ? 'file-homework-album' : kind === 'page' ? 'file-page-add' : 'file-homework';
   const el = document.getElementById(id);
   if (el) el.click();
@@ -2875,8 +2923,10 @@ async function addToTray(files, kind) {
   // 攒够了就别再让用户多点一次「开始批改」，裁完直接上传
   const shots = trayFiles.slice();
   const subId = pendingAddSubId;
+  const isPaper = pendingPaperId;
   endTray();
   if (subId) uploadPagesToSubmission(subId, shots);
+  else if (isPaper) uploadPaperFiles(shots);
   else uploadHomeworkFiles(shots);
 }
 
@@ -2924,11 +2974,11 @@ document.addEventListener('click', async (e) => {
     return;
   }
   if (t.closest('#tray-add-camera')) {
-    document.getElementById('file-homework').click();
+    reopenPicker('shoot');
     return;
   }
   if (t.closest('#tray-add-album')) {
-    document.getElementById('file-homework-album').click();
+    reopenPicker('album');
     return;
   }
   if (t.closest('#tray-cancel')) {
@@ -2938,8 +2988,10 @@ document.addEventListener('click', async (e) => {
   if (t.closest('#tray-go')) {
     const shots = trayFiles.slice();
     const subId = pendingAddSubId;
+    const isPaper = pendingPaperId;
     endTray();
     if (subId) uploadPagesToSubmission(subId, shots);
+    else if (isPaper) uploadPaperFiles(shots);
     else uploadHomeworkFiles(shots);
   }
 });
@@ -2956,43 +3008,23 @@ fileAlbum.addEventListener('change', () => {
   if (files.length) addToTray(files, 'album');
 });
 
-/* 组卷的答卷：拍做好的卷子交回来，挂到确认组卷时生成的那条作业记录上再批改 */
+/* 组卷的答卷：拍做好的卷子交回来，挂到确认组卷时生成的那条作业记录上再批改。
+   和普通交作业共用同一个「托盘」：可以反复拍/选，攒够多页一次性上传、一次批改。 */
 const filePaper = document.getElementById('file-paper');
 const filePaperAlbum = document.getElementById('file-paper-album');
 let pendingPaperId = '';
 
-async function handlePaperFile(input) {
-  const pid = pendingPaperId;
-  const file = input.files && input.files[0];
-  input.value = '';
-  if (!file || !pid) return;
-  const picked = await cropDialog(file, { title: '选要批改的范围' });
-  if (!picked) return;
-  let subId = null;
-  try {
-    busy(isHeicFile(picked) ? 'HEIC 照片正在转成 JPG…' : '上传中…');
-    const small = await compressImage(picked);
-    const extra = {};
-    const thumb = await makeThumb(picked);
-    if (thumb) extra.thumb = thumb;
-    const up = await api.upload(`/papers/${pid}/answer`, small, extra);
-    subId = up.id;
-    // 批改是后台任务：入队后立即返回，跳去详情页由它自动轮询刷新，
-    // 不再在这里挡遮罩同步等（那样模型慢一点就会「停在批改中」很久）。
-    await api.post(`/homework/${up.id}/grade`, {});
-    idle();
-    toast('已提交，正在后台批改…');
-    location.hash = `#/s/${up.id}`;
-  } catch (e) {
-    idle();
-    toast(e.message, 8000);
-    if (subId) location.hash = `#/s/${subId}`;
-    else location.hash = `#/paper/${pid}`;
-  }
-}
+filePaper.addEventListener('change', () => {
+  const files = Array.from(filePaper.files || []);
+  filePaper.value = '';
+  if (files.length) addToTray(files, 'shoot');
+});
 
-filePaper.addEventListener('change', () => handlePaperFile(filePaper));
-filePaperAlbum.addEventListener('change', () => handlePaperFile(filePaperAlbum));
+filePaperAlbum.addEventListener('change', () => {
+  const files = Array.from(filePaperAlbum.files || []);
+  filePaperAlbum.value = '';
+  if (files.length) addToTray(files, 'album');
+});
 
 /* ------------------------------------------------ 用户 */
 /* 家里的每个孩子一个账号。作业/错题/变式/卷子/大纲/模型设置都按 user_id 分开存，

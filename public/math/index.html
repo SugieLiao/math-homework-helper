@@ -79,9 +79,9 @@
 <!-- 从相册选（不带 capture，系统才会弹出「拍照 / 照片图库 / 浏览」选项）。multiple = 一次选多页 -->
 <input type="file" id="file-homework-album" accept="image/*" multiple class="hidden" />
 <input type="file" id="file-variant-album" accept="image/*" class="hidden" />
-<!-- 组卷的答卷（拍做好的卷子交回来） -->
+<!-- 组卷的答卷（拍做好的卷子交回来）。拍照单张（托盘里「再拍一张」攒多页），相册一次可多选 -->
 <input type="file" id="file-paper" accept="image/*" capture="environment" class="hidden" />
-<input type="file" id="file-paper-album" accept="image/*" class="hidden" />
+<input type="file" id="file-paper-album" accept="image/*" multiple class="hidden" />
 <!-- 作业详情里编辑图片：换掉某一页 / 再补几页（不带 capture，系统会同时给「拍照」和「照片图库」） -->
 <input type="file" id="file-page-replace" accept="image/*" class="hidden" />
 <input type="file" id="file-page-add" accept="image/*" multiple class="hidden" />

@@ -2457,7 +2457,8 @@ async function handleApi(
     }
     if (file.size > 10 * 1024 * 1024) throw new HttpError(400, '图片太大了（超过 10MB），请压缩或截图后再传。');
 
-    let subId: string = paper.submission_id || '';
+    let subId: string = String(form.get('submission_id') || '').trim();
+    if (!subId) subId = paper.submission_id || '';
     if (!subId) {
       const exist = await env.DB.prepare('SELECT id FROM submissions WHERE paper_id = ?').bind(pid).first<any>();
       subId = exist?.id || '';
@@ -2472,6 +2473,31 @@ async function handleApi(
         .bind(subId, uid, paper.lesson_id || null, paper.textbook_id || null, pid, now())
         .run();
       await env.DB.prepare('UPDATE papers SET submission_id = ? WHERE id = ? AND user_id = ?').bind(subId, pid, uid).run();
+    } else {
+      // 确认这份作业确实归当前用户、且属于这张卷子
+      const sub = await env.DB.prepare('SELECT id FROM submissions WHERE id = ? AND user_id = ? AND paper_id = ?')
+        .bind(subId, uid, pid)
+        .first<any>();
+      if (!sub) throw new HttpError(404, '这份答卷不存在，重新拍一次');
+    }
+
+    // 多页答卷：带 submission_id 且已有页时，追加成第 2、3… 页（和普通作业一致）
+    const cnt = await env.DB.prepare('SELECT COUNT(*) AS c FROM submission_pages WHERE submission_id = ?')
+      .bind(subId)
+      .first<any>();
+    const hasPages = Number(cnt?.c || 0) > 0;
+    if (hasPages) {
+      if (Number(cnt?.c || 0) >= 8) throw new HttpError(400, '一份答卷最多 8 页，多了分成两次交吧。');
+      const pos = Number(cnt?.c || 0);
+      const key = `page/${subId}-${pos}.${ext}`;
+      await env.IMAGES.put(key, await file.arrayBuffer(), { httpMetadata: { contentType: contentTypeOf(key) } });
+      const thumbKey = await storeThumb(env, form, `${subId}-${pos}`);
+      await env.DB.prepare(
+        'INSERT INTO submission_pages (id, submission_id, pos, image_key, thumb_key, created_at) VALUES (?,?,?,?,?,?)',
+      )
+        .bind(uuid(), subId, pos, key, thumbKey, now())
+        .run();
+      return json({ id: subId, image_key: key, pos });
     }
 
     const key = `orig/${subId}.${ext}`;
