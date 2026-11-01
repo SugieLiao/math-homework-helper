@@ -3067,6 +3067,23 @@ export function getCurrentUser() {
   return currentUser;
 }
 
+/* 导航栏金币余额：当前统一 uid → 积分中心余额；点击「我的」进统一用户中心 */
+async function loadCoins() {
+  const el = document.getElementById('coin-num');
+  if (!el) return;
+  const uid = getUserId();
+  if (!uid) { el.textContent = '--'; return; }
+  try {
+    const r = await fetch('/points/api/me?uid=' + encodeURIComponent(uid));
+    const d = await r.json();
+    el.textContent = d && d.ok ? Math.round(d.balance * 100) / 100 : '--';
+  } catch (e) { el.textContent = '--'; }
+}
+function openMine() {
+  const uid = getUserId();
+  if (uid) location.href = '/points/me.html?uid=' + encodeURIComponent(uid);
+}
+
 function paintUserChip() {
   const av = document.getElementById('uc-avatar');
   const nm = document.getElementById('uc-name');
@@ -3093,6 +3110,7 @@ async function loadUsers() {
   currentUser = { id: hit.id, name: hit.name, avatar: hit.avatar || '🙂' };
   if (getUserId() !== hit.id) setUserId(hit.id);
   paintUserChip();
+  loadCoins();
 }
 
 function renderUserModal() {
@@ -3138,6 +3156,7 @@ function switchUser(id) {
     setUserId(id);
     currentUser = { id, name: u ? u.name : '', avatar: (u && u.avatar) || '🙂' };
     paintUserChip();
+    loadCoins();
     // 教材 id 是每人一份的，跨用户留着会把 A 的教材 id 拿去查 B 的大纲
     localStorage.removeItem(TB_KEY);
     localStorage.removeItem(SORT_KEY);
@@ -3179,6 +3198,7 @@ async function renderUsers() {
     currentUser = { id: hit.id, name: hit.name, avatar: hit.avatar || '🙂' };
     setUserId(hit.id);
     paintUserChip();
+    loadCoins();
   }
   paintUsersPage();
 }

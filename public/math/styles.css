@@ -382,6 +382,22 @@ img.zoomable { cursor: zoom-in; }
 .user-chip .uc-avatar { font-size: 16px; line-height: 1; }
 .user-chip .uc-name { font-weight: 600; max-width: 5em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 导航栏金币余额 + 「我的」入口 */
+.coin-pill {
+  flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px;
+  padding: 5px 11px; border-radius: 999px; border: 1px solid #efd9a0;
+  background: #fff6de; color: #8a6d1d; cursor: pointer; font-weight: 700;
+  font-size: 13px; transition: .15s;
+}
+.coin-pill:hover { border-color: #e4c57f; background: #fff0c8; }
+.coin-pill .coin-dot { color: #e2a72a; font-size: 15px; line-height: 1; }
+.mine-link {
+  flex: 0 0 auto; border: 1px solid #cfd6e6; background: #fff;
+  color: var(--primary); padding: 5px 12px; border-radius: 999px;
+  cursor: pointer; font-weight: 600; font-size: 13px; transition: .15s;
+}
+.mine-link:hover { border-color: #aab6d6; background: var(--primary-soft); }
+
 /* 切换用户弹窗里的列表 */
 .user-list { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 .user-row {
