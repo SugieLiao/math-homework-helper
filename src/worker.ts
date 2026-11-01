@@ -1048,25 +1048,42 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
       } catch (e) {}
     };
     const graded = await env.DB.prepare(
-      'SELECT id, is_correct FROM questions WHERE submission_id = ? AND user_id = ?',
+      'SELECT id, stem, is_correct FROM questions WHERE submission_id = ? AND user_id = ?',
     )
       .bind(id, uid)
       .all<any>();
     const gq = graded.results || [];
-    const cN = gq.filter((q) => Number(q.is_correct) === 1).length;
-    const wN = gq.length - cN;
+    // 同一道题（同题干）多个空只算一次积分：按题干去重，该题任一空对则记对，否则记错。
+    // 例：一题两空都做对，只记 1 次 math_correct（qty=1），不再按空各记一次。
+    const byStem = new Map<string, { any: boolean }>();
+    for (const q of gq) {
+      const key = String(q.stem ?? '').trim();
+      if (!key) { byStem.set(q.id, { any: Number(q.is_correct) === 1 }); continue; }
+      const e = byStem.get(key) || { any: false };
+      if (Number(q.is_correct) === 1) e.any = true;
+      byStem.set(key, e);
+    }
+    const uniq = [...byStem.values()];
+    const cN = uniq.filter((e) => e.any).length;
+    const wN = uniq.filter((e) => !e.any).length;
     const subExt = 'sub-' + id;
     if (cN > 0) await report('math_correct', subExt + '-c', cN);
     if (wN > 0) await report('math_wrong', subExt + '-w', wN);
-    // 错题过关计分：原本是错题(base_wrong)且已过关(同类型做对 2 次) → math_pass
+    // 错题过关计分：原本是错题(base_wrong)且已过关(同类型做对 2 次) → math_pass。
+    // 同一道题多空也只计一次（同题干去重，任一空过关即报一次）。
+    const passByStem = new Map<string, { id: string; pass: boolean }>();
     for (const q of gq) {
+      const key = String(q.stem ?? '').trim() || q.id;
+      const e = passByStem.get(key) || { id: q.id, pass: false };
       const full = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(q.id).first<any>();
       if (full) {
         const withM = await questionWithMastery(env, full);
-        if (withM.mastery.base_wrong && withM.mastery.passed) {
-          await report('math_pass', 'q-' + q.id, 1);
-        }
+        if (withM.mastery.base_wrong && withM.mastery.passed) e.pass = true;
       }
+      passByStem.set(key, e);
+    }
+    for (const [, e] of passByStem) {
+      if (e.pass) await report('math_pass', 'q-' + e.id, 1);
     }
   } catch (e) {}
 
