@@ -986,7 +986,13 @@ async function submission(id) {
     const needCrop = qs.filter(
       (q) => !Number(q.is_correct) && !q.answer_image_key && bandOf(q.answer_band),
     );
-    if (needCrop.length) attachAnswerImages(id, needCrop).catch(() => {});
+    if (needCrop.length) {
+      attachAnswerImages(id, needCrop)
+        .then(() => {
+          if (!stalePage(epoch)) submission(id);
+        })
+        .catch(() => {});
+    }
   }
 }
 
@@ -1569,7 +1575,11 @@ async function wrongBook() {
       bySub[q.submission_id].push(q);
     }
     for (const [sid, list] of Object.entries(bySub)) {
-      attachAnswerImages(sid, list).catch(() => {});
+      attachAnswerImages(sid, list)
+        .then(() => {
+          if (!stalePage(epoch)) wrongBook();
+        })
+        .catch(() => {});
     }
   }
 
