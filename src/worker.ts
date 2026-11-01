@@ -1036,7 +1036,7 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
 
   // ==== 积分上报（批改完成后，幂等：external_id 由积分中心去重） ====
   try {
-    const POINTS_API = 'https://points-center.hao-liao01.workers.dev/points/api';
+    const POINTS_API = 'https://kids.liaohao.cc/points/api';
     const report = async (taskKey: string, externalId: string, qty: number) => {
       if (!uid || !qty) return;
       try {
