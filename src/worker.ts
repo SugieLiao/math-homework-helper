@@ -1033,6 +1033,43 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
   await env.DB.prepare("UPDATE submissions SET status = 'graded', error_msg = NULL WHERE id = ? AND user_id = ?")
     .bind(id, uid)
     .run();
+
+  // ==== 积分上报（批改完成后，幂等：external_id 由积分中心去重） ====
+  try {
+    const POINTS_API = 'https://points-center.hao-liao01.workers.dev/points/api';
+    const report = async (taskKey: string, externalId: string, qty: number) => {
+      if (!uid || !qty) return;
+      try {
+        await fetch(POINTS_API + '/event', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: uid, app: 'math', taskKey, externalId, qty }),
+        });
+      } catch (e) {}
+    };
+    const graded = await env.DB.prepare(
+      'SELECT id, is_correct FROM questions WHERE submission_id = ? AND user_id = ?',
+    )
+      .bind(id, uid)
+      .all<any>();
+    const gq = graded.results || [];
+    const cN = gq.filter((q) => Number(q.is_correct) === 1).length;
+    const wN = gq.length - cN;
+    const subExt = 'sub-' + id;
+    if (cN > 0) await report('math_correct', subExt + '-c', cN);
+    if (wN > 0) await report('math_wrong', subExt + '-w', wN);
+    // 错题过关计分：原本是错题(base_wrong)且已过关(同类型做对 2 次) → math_pass
+    for (const q of gq) {
+      const full = await env.DB.prepare('SELECT * FROM questions WHERE id = ?').bind(q.id).first<any>();
+      if (full) {
+        const withM = await questionWithMastery(env, full);
+        if (withM.mastery.base_wrong && withM.mastery.passed) {
+          await report('math_pass', 'q-' + q.id, 1);
+        }
+      }
+    }
+  } catch (e) {}
+
   return json({ submission_id: id, questions: created });
 }
 
