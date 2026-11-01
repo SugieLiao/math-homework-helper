@@ -980,6 +980,14 @@ async function submission(id) {
 
   // 还在批改中：启动轮询，后台批改一完成就自动刷新，不用手动刷
   if (s.status === 'grading') autoRefreshGrading(id, epoch);
+
+  // 已批改完成但错题还没截图的：后台批改完成时可能人没在页面上，打开详情时补裁一次（幂等）
+  if (s.status === 'graded' && qs.length) {
+    const needCrop = qs.filter(
+      (q) => !Number(q.is_correct) && !q.answer_image_key && bandOf(q.answer_band),
+    );
+    if (needCrop.length) attachAnswerImages(id, needCrop).catch(() => {});
+  }
 }
 
 /**
@@ -1172,7 +1180,7 @@ async function attachAnswerImages(subId, list, blobs) {
   for (const q of list) {
     // 家长自己框过的题（answer_crop）别再按系统猜的位置覆盖回去，那正是他要改掉的
     if (q.answer_crop) continue;
-    const band = bandOf(q.band);
+    const band = bandOf(q.band ?? q.answer_band);
     if (!band) continue;
     const idx = Math.max(0, Math.min(imgs.length - 1, (Number(q.page) || 1) - 1));
     const src = imgs[idx];
@@ -1548,6 +1556,22 @@ async function wrongBook() {
     if (!ids.length) return toast('先勾选要加入的错题');
     addToQueue(ids);
   };
+
+  // 错题本兜底：后台批改完成时人没在页面上，错题截图就欠着；打开错题本时按作业把
+  // 还没截图的错题自动补裁（幂等：无图且能定位作答区域的才补，补完下次进来自动有图）
+  const needRecrop = wrongs.filter(
+    (q) => !q.answer_image_key && bandOf(q.answer_band) && q.submission_id,
+  );
+  if (needRecrop.length) {
+    const bySub = {};
+    for (const q of needRecrop) {
+      if (!bySub[q.submission_id]) bySub[q.submission_id] = [];
+      bySub[q.submission_id].push(q);
+    }
+    for (const [sid, list] of Object.entries(bySub)) {
+      attachAnswerImages(sid, list).catch(() => {});
+    }
+  }
 
   const doDeleteWrong = async (ids) => {
     if (!ids.length) return toast('先勾选要删除的错题');
