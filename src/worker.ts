@@ -942,7 +942,8 @@ async function gradeHomework(env: Env, id: string, uid: string): Promise<Respons
     if (rows.length) {
       userPrompt +=
         '\n\n【这份卷子原本的题目和正确答案，供你校对（学生答案仍以图片上手写的为准，图片上没写的就是没作答）】\n' +
-        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n');
+        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n') +
+        '\n\n注意：练习卷通常排版稀疏，题目往往只占照片上部，照片下方常有大片空白。answer_band 必须是每道题答案行在照片中的精确纵向百分比（0-100），严格看着照片判断实际位置，不要按题号在整页上均匀铺满，没有题目的空白区域不要分配位置。';
     }
   }
 
@@ -1163,7 +1164,8 @@ async function gradePage(env: Env, subId: string, pageId: string, uid: string): 
     if (rows.length) {
       userPrompt +=
         '\n\n【这份卷子原本的题目和正确答案，供你校对（学生答案仍以图片上手写的为准，图片上没写的就是没作答）】\n' +
-        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n');
+        rows.map((r: any, i: number) => `${i + 1}. ${r.stem} → ${r.answer}`).join('\n') +
+        '\n\n注意：练习卷通常排版稀疏，题目往往只占照片上部，照片下方常有大片空白。answer_band 必须是每道题答案行在照片中的精确纵向百分比（0-100），严格看着照片判断实际位置，不要按题号在整页上均匀铺满，没有题目的空白区域不要分配位置。';
     }
   }
 
