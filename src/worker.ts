@@ -740,13 +740,33 @@ async function textbookTree(env: Env, uid: string, textbookId?: string): Promise
   const ls = await env.DB.prepare('SELECT * FROM lessons WHERE user_id = ? ORDER BY sort, name').bind(uid).all<any>();
   const units = us.results || [];
   const lessons = ls.results || [];
+  // 有作业 / 有错题的课文 id 集合：首页和错题本筛选器只列有数据的课文，别把空课文全摆出来
+  const subRows = await env.DB.prepare(
+    'SELECT DISTINCT s.lesson_id FROM submissions s WHERE s.user_id = ? AND s.lesson_id IS NOT NULL',
+  )
+    .bind(uid)
+    .all<any>();
+  const wrongRows = await env.DB.prepare(
+    'SELECT DISTINCT s.lesson_id FROM questions q JOIN submissions s ON s.id = q.submission_id WHERE q.user_id = ? AND q.is_correct = 0 AND s.lesson_id IS NOT NULL',
+  )
+    .bind(uid)
+    .all<any>();
+  const hasSub = new Set((subRows.results || []).map((r: any) => r.lesson_id));
+  const hasWrong = new Set((wrongRows.results || []).map((r: any) => r.lesson_id));
   return units.map((u) => ({
     id: u.id,
     name: u.name,
     is_custom: !!Number(u.is_custom),
     lessons: lessons
       .filter((l) => l.unit_id === u.id)
-      .map((l) => ({ id: l.id, name: l.name, is_custom: !!Number(l.is_custom), sort: Number(l.sort) || 0 })),
+      .map((l) => ({
+        id: l.id,
+        name: l.name,
+        is_custom: !!Number(l.is_custom),
+        sort: Number(l.sort) || 0,
+        has_submission: hasSub.has(l.id),
+        has_wrong: hasWrong.has(l.id),
+      })),
   }));
 }
 
@@ -1806,6 +1826,15 @@ async function handleApi(
     const qTb = (url.searchParams.get('textbook') || '').trim();
     if (qLesson === '__none') {
       sql += ' AND s.lesson_id IS NULL';
+    } else if (qLesson.includes(',')) {
+      const lessonList = qLesson
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (lessonList.length) {
+        sql += ` AND s.lesson_id IN (${lessonList.map(() => '?').join(',')})`;
+        binds.push(...lessonList);
+      }
     } else if (qLesson) {
       sql += ' AND s.lesson_id = ?';
       binds.push(qLesson);
@@ -2630,6 +2659,15 @@ async function handleApi(
     if (lessonId === '__none') {
       // 只看「没归类」的作业
       sql += ' AND s.lesson_id IS NULL';
+    } else if (lessonId.includes(',')) {
+      const lessonList = lessonId
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+      if (lessonList.length) {
+        sql += ` AND s.lesson_id IN (${lessonList.map(() => '?').join(',')})`;
+        binds.push(...lessonList);
+      }
     } else if (lessonId) {
       sql += ' AND s.lesson_id = ?';
       binds.push(lessonId);

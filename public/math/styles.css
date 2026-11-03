@@ -434,3 +434,23 @@ img.zoomable { cursor: zoom-in; }
   .user-chip { padding: 5px 8px; }
   .user-chip .uc-name { display: none; }
 }
+
+/* ------------------------------------------------ 筛选面板（作业列表 / 错题本） */
+.filter-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; }
+.filter-toggle .ft-arrow { transition: transform .18s; font-size: 12px; color: var(--ink-3); }
+.filter-toggle.open .ft-arrow { transform: rotate(180deg); }
+.filter-panel { margin: 10px 0 14px; padding: 12px; background: #f4f7fe; border: 1px solid #e2e9fb; border-radius: var(--radius); }
+.filter-label { font-size: 13px; color: var(--ink-2); margin: 0 0 8px; }
+.chip-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip-scroll { max-height: 220px; overflow-y: auto; padding: 2px; }
+.chip-unit-group { margin-bottom: 10px; }
+.chip-unit-group:last-child { margin-bottom: 0; }
+.chip-unit-name { font-size: 12px; color: var(--ink-3); margin-bottom: 6px; font-weight: 600; }
+.lesson-check-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.lesson-check { display: inline-flex; align-items: center; gap: 6px; padding: 7px 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; font-size: 14px; cursor: pointer; user-select: none; }
+.lesson-check input { width: 16px; height: 16px; accent-color: var(--primary); margin: 0; }
+.lesson-check.checked { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); }
+.filter-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 6px 14px; border: 1px solid var(--line); border-radius: 999px; background: #fff; color: var(--ink); font-size: 14px; cursor: pointer; user-select: none; white-space: nowrap; }
+.chip:hover { border-color: var(--ink-3); }
+.chip.active { background: var(--primary-soft); border-color: var(--primary); color: var(--primary); font-weight: 600; }

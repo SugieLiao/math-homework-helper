@@ -87,6 +87,7 @@ function qCard(q, withCheck = false, canRecrop = false) {
 /* ------------------------------------------------ 首页 */
 const TB_KEY = 'mh_textbook';
 const SORT_KEY = 'mh_sort'; // 作业列表排序方式：syllabus 大纲顺序 / time 创建时间 / wrong 错题数量
+const FILTER_KEY = 'mh_filter_open'; // 作业列表筛选面板是否展开
 
 /* 交作业弹窗：点「拍照 / 相册」时先弹出来，让用户选这次作业归到哪一课，再调起相机 */
 let pendingKind = null; // 'shoot' | 'album'
@@ -273,6 +274,10 @@ async function home(opts = {}) {
     tbId = textbooks[0]?.id || '';
   }
   const lessonFilter = opts.lesson || '';
+  // 多选课文：lessonFilter 是逗号分隔的 id 串（如 'id1,id2'），拆成 Set 方便判断选中态
+  const selectedLessonSet = new Set(
+    lessonFilter && lessonFilter !== '__none' ? lessonFilter.split(',').filter(Boolean) : [],
+  );
   // 排序方式：没传就用上次选的，默认按大纲顺序
   const sortMode = opts.sort || localStorage.getItem(SORT_KEY) || 'syllabus';
 
@@ -293,16 +298,6 @@ async function home(opts = {}) {
   if (ur.status === 'fulfilled') units = (ur.value && ur.value.units) || [];
   const subErr = sr.status === 'rejected' ? sr.reason : null;
 
-  const lessonOptionsFor = (list) =>
-    list
-      .map(
-        (u) =>
-          `<optgroup label="${esc(u.name)}">${u.lessons
-            .map((l) => `<option value="${esc(l.id)}">${esc(l.name)}</option>`)
-            .join('')}</optgroup>`,
-      )
-      .join('');
-
   // 从「大纲 → 某课 → 看作业」进来的（#/textbook/l/xxx），这是二级页面：给个返回，回大纲。
   // 用 hash 判断而不是靠传参，这样在本页里换教材/换课文/换排序重画后按钮还在。
   const fromTextbook = (location.hash || '').indexOf('#/textbook/l/') === 0;
@@ -314,16 +309,40 @@ async function home(opts = {}) {
       <button class="btn primary big" id="btn-album">🖼 从相册交作业</button>
     </div>
 
-    <div class="filter-bar">
-      <select id="tb-pick" title="教材">
-        <option value="" ${tbId ? '' : 'selected'}>全部教材</option>
-        ${textbooks.map((t) => `<option value="${esc(t.id)}" ${t.id === tbId ? 'selected' : ''}>${esc(t.name)}</option>`).join('')}
-      </select>
-      <select id="filter-lesson" title="课文">
-        <option value="">全部课文</option>
-        <option value="__none" ${lessonFilter === '__none' ? 'selected' : ''}>只看未归类</option>
-        ${lessonOptionsFor(units)}
-      </select>
+    <div class="row wrap" style="margin:10px 0 0">
+      <button class="btn sm filter-toggle" id="filter-toggle">🔍 筛选 <span class="ft-arrow">▾</span></button>
+      <span class="spacer"></span>
+      ${lessonFilter || tbId ? `<span class="small muted" id="filter-hint">${lessonFilter && lessonFilter !== '__none' ? '已按课文筛选' : tbId ? '已按教材筛选' : ''}</span>` : ''}
+    </div>
+    <div class="filter-panel hidden" id="filter-panel">
+      <div class="filter-label">教材</div>
+      <div class="chip-group" id="tb-chips">
+        <span class="chip ${!tbId ? 'active' : ''}" data-tb="">全部教材</span>
+        ${textbooks.map((t) => `<span class="chip ${t.id === tbId ? 'active' : ''}" data-tb="${esc(t.id)}">${esc(t.name)}</span>`).join('')}
+      </div>
+      <div class="filter-label" style="margin-top:12px">课文（可复选）</div>
+      <div class="chip-scroll" id="lesson-chips">
+        <label class="lesson-check ${lessonFilter === '__none' ? 'checked' : ''}"><input type="checkbox" data-lesson="__none" ${lessonFilter === '__none' ? 'checked' : ''} /> 只看未归类</label>
+        ${units
+          .map((u) => {
+            const activeLessons = (u.lessons || []).filter((l) => l.has_submission);
+            if (!activeLessons.length) return '';
+            return `
+        <div class="chip-unit-group">
+          <div class="chip-unit-name">${esc(u.name)}</div>
+          <div class="lesson-check-group">${activeLessons
+            .map(
+              (l) => `<label class="lesson-check ${selectedLessonSet.has(l.id) ? 'checked' : ''}"><input type="checkbox" data-lesson="${esc(l.id)}" ${selectedLessonSet.has(l.id) ? 'checked' : ''} /> ${esc(l.name)}</label>`,
+            )
+            .join('')}</div>
+        </div>`;
+          })
+          .join('')}
+      </div>
+      <div class="filter-actions">
+        <button class="btn sm" id="filter-reset">重置</button>
+        <button class="btn sm primary" id="filter-apply">确定</button>
+      </div>
     </div>
 
     <div id="stats" class="stat-grid" style="margin:12px 0">
@@ -353,13 +372,73 @@ async function home(opts = {}) {
   document.getElementById('btn-shoot').onclick = () => openUploadModal('shoot', textbooks, tbId, preferLesson);
   document.getElementById('btn-album').onclick = () => openUploadModal('album', textbooks, tbId, preferLesson);
 
-  // 记得住这次选的教材
-  document.getElementById('tb-pick').onchange = async (e) => {
-    localStorage.setItem(TB_KEY, e.target.value);
-    await home({ textbook: e.target.value });
+  // 筛选折叠/展开：默认折叠，记住这次会话里的展开状态
+  const filterOpen = localStorage.getItem(FILTER_KEY) === '1';
+  const toggleBtn = document.getElementById('filter-toggle');
+  const panel = document.getElementById('filter-panel');
+  const setFilterOpen = (open) => {
+    panel.classList.toggle('hidden', !open);
+    toggleBtn.classList.toggle('open', open);
+    localStorage.setItem(FILTER_KEY, open ? '1' : '0');
   };
-  document.getElementById('filter-lesson').onchange = async (e) => {
-    await home({ textbook: tbId, lesson: e.target.value });
+  setFilterOpen(filterOpen);
+  toggleBtn.onclick = () => setFilterOpen(panel.classList.contains('hidden'));
+
+  // 教材胶囊：单选，切换后重拉大纲（课文列表跟着变），但不刷作业列表，等点「确定」
+  document.getElementById('tb-chips').querySelectorAll('[data-tb]').forEach((chip) => {
+    chip.onclick = async () => {
+      localStorage.setItem(TB_KEY, chip.dataset.tb);
+      await home({ textbook: chip.dataset.tb, lesson: lessonFilter });
+    };
+  });
+  // 课文 checkbox：勾选/取消只改本地选中态和样式，不刷新；点「确定」才应用
+  const lessonChecks = document.getElementById('lesson-chips').querySelectorAll('input[data-lesson]');
+  lessonChecks.forEach((cb) => {
+    cb.onchange = () => {
+      const label = cb.closest('.lesson-check');
+      if (label) label.classList.toggle('checked', cb.checked);
+    };
+  });
+  // 「只看未归类」和具体课文互斥：勾了未归类就取消所有具体课文，反之亦然
+  const noneCheck = document.querySelector('#lesson-chips input[data-lesson="__none"]');
+  if (noneCheck) {
+    noneCheck.onchange = () => {
+      if (noneCheck.checked) {
+        lessonChecks.forEach((cb) => {
+          if (cb.dataset.lesson !== '__none') {
+            cb.checked = false;
+            const l = cb.closest('.lesson-check');
+            if (l) l.classList.remove('checked');
+          }
+        });
+      }
+    };
+  }
+  lessonChecks.forEach((cb) => {
+    if (cb.dataset.lesson !== '__none') {
+      cb.onchange = () => {
+        if (cb.checked && noneCheck) {
+          noneCheck.checked = false;
+          const l = noneCheck.closest('.lesson-check');
+          if (l) l.classList.remove('checked');
+        }
+      };
+    }
+  });
+  // 确定：把勾选的课文 id 拼成逗号串，应用到筛选并刷新列表
+  document.getElementById('filter-apply').onclick = async () => {
+    const picked = [];
+    let none = false;
+    lessonChecks.forEach((cb) => {
+      if (cb.dataset.lesson === '__none') none = cb.checked;
+      else if (cb.checked) picked.push(cb.dataset.lesson);
+    });
+    const next = none ? '__none' : picked.join(',');
+    await home({ textbook: tbId, lesson: next });
+  };
+  // 重置：清空课文筛选（教材保留当前）
+  document.getElementById('filter-reset').onclick = async () => {
+    await home({ textbook: tbId, lesson: '' });
   };
   document.getElementById('sort-pick').onchange = async (e) => {
     localStorage.setItem(SORT_KEY, e.target.value);
@@ -1393,25 +1472,35 @@ async function deletePageFlow(subId, pageId, pageNo, qCount) {
 /* 错题本排序：syllabus 按大纲（单元→课文）分组 / time 按作业时间倒序平铺。默认大纲。
    模块级变量：改判 / 重框 / 删除后页面会重画，排序选择要留着。 */
 let wrongSort = 'syllabus';
+let wrongFilter = { textbook: '', lesson: '' }; // 错题本筛选：教材 / 课文
 
 /* 错题本：按「教材 → 单元 → 课文」分组，组标题上带全选框（可整课 / 整单元选中组卷） */
 async function wrongBook() {
   const epoch = routeEpoch;
   view.innerHTML = listSkeleton('正在加载错题本…', 4);
-  // 错题本只需要一趟：/questions 已经通过 JOIN 带回了 unit_name/lesson_name，
-  // 不再单独拉 /textbooks 和 /textbook（那两趟只喂冗余的 id→名字映射，纯浪费 ~1.5s）。
+  const wTb = wrongFilter.textbook;
+  const wLesson = wrongFilter.lesson;
+  // 教材列表 + 当前教材大纲（喂筛选器胶囊）和错题一起拉
+  const qs = wLesson ? `?lesson=${encodeURIComponent(wLesson)}` : wTb ? `?textbook=${encodeURIComponent(wTb)}` : '';
+  const [tbs, tree, qdata] = await Promise.allSettled([
+    api.get('/textbooks'),
+    api.get(wTb ? `/textbook?textbook=${encodeURIComponent(wTb)}` : '/textbook'),
+    api.get(`/questions?filter=wrong${qs ? `&${qs.slice(1)}` : ''}`),
+  ]);
+  if (stalePage(epoch)) return;
+  const textbooks = (tbs.status === 'fulfilled' && tbs.value.textbooks) || [];
+  const units = (tree.status === 'fulfilled' && tree.value.units) || [];
   let data;
-  try {
-    data = await api.get('/questions?filter=wrong');
-  } catch (e) {
-    if (stalePage(epoch)) return;
-    view.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+  if (qdata.status === 'fulfilled') data = qdata.value;
+  else {
+    view.innerHTML = `<div class="empty">${esc(qdata.reason?.message || '加载失败')}</div>`;
     return;
   }
   if (stalePage(epoch)) return;
 
   const all = (data.questions || []).map((q) => ({ ...q, wrong: !!q.mastery.base_wrong }));
   const wrongs = all.filter((q) => q.wrong);
+  const wLessonSet = new Set(wLesson && wLesson !== '__none' ? wLesson.split(',').filter(Boolean) : []);
 
   const groupOf = (q) => ({
     uKey: q.unit_id || '__none',
@@ -1503,6 +1592,41 @@ async function wrongBook() {
   if (stalePage(epoch)) return;
   view.innerHTML = `
     <h2>错题本</h2>
+    <div class="row wrap" style="margin:10px 0 0">
+      <button class="btn sm filter-toggle" id="wf-toggle">🔍 筛选 <span class="ft-arrow">▾</span></button>
+      <span class="spacer"></span>
+      ${wLesson || wTb ? `<span class="small muted">${wLesson && wLesson !== '__none' ? '已按课文筛选' : wTb ? '已按教材筛选' : ''}</span>` : ''}
+    </div>
+    <div class="filter-panel hidden" id="wf-panel">
+      <div class="filter-label">教材</div>
+      <div class="chip-group" id="wf-tb">
+        <span class="chip ${!wTb ? 'active' : ''}" data-tb="">全部教材</span>
+        ${textbooks.map((t) => `<span class="chip ${t.id === wTb ? 'active' : ''}" data-tb="${esc(t.id)}">${esc(t.name)}</span>`).join('')}
+      </div>
+      <div class="filter-label" style="margin-top:12px">课文（可复选）</div>
+      <div class="chip-scroll" id="wf-lesson">
+        <label class="lesson-check ${wLesson === '__none' ? 'checked' : ''}"><input type="checkbox" data-lesson="__none" ${wLesson === '__none' ? 'checked' : ''} /> 只看未归类</label>
+        ${units
+          .map((u) => {
+            const activeLessons = (u.lessons || []).filter((l) => l.has_wrong);
+            if (!activeLessons.length) return '';
+            return `
+        <div class="chip-unit-group">
+          <div class="chip-unit-name">${esc(u.name)}</div>
+          <div class="lesson-check-group">${activeLessons
+            .map(
+              (l) => `<label class="lesson-check ${wLessonSet.has(l.id) ? 'checked' : ''}"><input type="checkbox" data-lesson="${esc(l.id)}" ${wLessonSet.has(l.id) ? 'checked' : ''} /> ${esc(l.name)}</label>`,
+            )
+            .join('')}</div>
+        </div>`;
+          })
+          .join('')}
+      </div>
+      <div class="filter-actions">
+        <button class="btn sm" id="wf-reset">重置</button>
+        <button class="btn sm primary" id="wf-apply">确定</button>
+      </div>
+    </div>
     <div class="card noprint">
       <div class="row wrap">
         <b>已选 <span id="sel-count">0</span> 道错题</b>
@@ -1528,6 +1652,72 @@ async function wrongBook() {
       wrongBook();
     };
   }
+
+  // 错题本筛选：折叠/展开 + 教材/课文胶囊
+  const wfToggle = document.getElementById('wf-toggle');
+  const wfPanel = document.getElementById('wf-panel');
+  const wfOpen = localStorage.getItem('mh_wf_open') === '1';
+  const setWfOpen = (open) => {
+    wfPanel.classList.toggle('hidden', !open);
+    wfToggle.classList.toggle('open', open);
+    localStorage.setItem('mh_wf_open', open ? '1' : '0');
+  };
+  setWfOpen(wfOpen);
+  wfToggle.onclick = () => setWfOpen(wfPanel.classList.contains('hidden'));
+  document.getElementById('wf-tb').querySelectorAll('[data-tb]').forEach((chip) => {
+    chip.onclick = async () => {
+      wrongFilter = { textbook: chip.dataset.tb, lesson: wrongFilter.lesson };
+      localStorage.setItem(TB_KEY, chip.dataset.tb);
+      await wrongBook();
+    };
+  });
+  const wfChecks = document.getElementById('wf-lesson').querySelectorAll('input[data-lesson]');
+  wfChecks.forEach((cb) => {
+    cb.onchange = () => {
+      const label = cb.closest('.lesson-check');
+      if (label) label.classList.toggle('checked', cb.checked);
+    };
+  });
+  const wfNone = document.querySelector('#wf-lesson input[data-lesson="__none"]');
+  if (wfNone) {
+    wfNone.onchange = () => {
+      if (wfNone.checked) {
+        wfChecks.forEach((cb) => {
+          if (cb.dataset.lesson !== '__none') {
+            cb.checked = false;
+            const l = cb.closest('.lesson-check');
+            if (l) l.classList.remove('checked');
+          }
+        });
+      }
+    };
+  }
+  wfChecks.forEach((cb) => {
+    if (cb.dataset.lesson !== '__none') {
+      cb.onchange = () => {
+        if (cb.checked && wfNone) {
+          wfNone.checked = false;
+          const l = wfNone.closest('.lesson-check');
+          if (l) l.classList.remove('checked');
+        }
+      };
+    }
+  });
+  document.getElementById('wf-apply').onclick = async () => {
+    const picked = [];
+    let none = false;
+    wfChecks.forEach((cb) => {
+      if (cb.dataset.lesson === '__none') none = cb.checked;
+      else if (cb.checked) picked.push(cb.dataset.lesson);
+    });
+    const next = none ? '__none' : picked.join(',');
+    wrongFilter = { textbook: wrongFilter.textbook, lesson: next };
+    await wrongBook();
+  };
+  document.getElementById('wf-reset').onclick = async () => {
+    wrongFilter = { textbook: wrongFilter.textbook, lesson: '' };
+    await wrongBook();
+  };
 
   const boxes = () => Array.from(view.querySelectorAll('.wcheck'));
   const refreshCount = () => {
